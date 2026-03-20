@@ -11,6 +11,7 @@
 #include "gps_manager.h"
 #include "gnss_integrity.h"
 #include "display.h"
+#include "detection_engine.h"
 #include "alert_handler.h"
 
 // Hardware objects — each owned by exactly one task after setup()
@@ -71,23 +72,47 @@ static void printBanner() {
 
 // ── Task functions ──────────────────────────────────────────────────────────
 
+static const char* threatLevelStr(ThreatLevel t) {
+    switch (t) {
+        case THREAT_ADVISORY: return "ADVISORY";
+        case THREAT_WARNING:  return "WARNING";
+        case THREAT_CRITICAL: return "CRITICAL";
+        default:              return "CLEAR";
+    }
+}
+
 // Core 1 — LoRa SPI is only touched here, no mutex needed for the radio
 static void loRaScanTask(void* param) {
     ScanResult localResult;
+    GpsData snapGps = {};
+    IntegrityStatus snapIntegrity = {};
 
     for (;;) {
         scannerSweep(radio, localResult);
 
-        // Copy result into shared state under lock
+        // Snapshot GPS/integrity + update scan in shared state under one lock
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             systemState.spectrum = localResult;
             systemState.lastSweepMs = millis();
+            snapGps = systemState.gps;
+            snapIntegrity = systemState.integrity;
+            xSemaphoreGive(stateMutex);
+        }
+
+        // Detection engine — single-threaded, runs only here
+        ThreatLevel threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity);
+
+        // Store threat level back into shared state
+        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            systemState.threatLevel = threat;
             xSemaphoreGive(stateMutex);
         }
 
         if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             scannerPrintCSV(localResult);
-            scannerPrintSummary(localResult);
+            Serial.printf("[SCAN] Peak: %.1f MHz @ %.1f dBm (%lu ms) | Threat: %s\n",
+                          localResult.peakFreq, localResult.peakRSSI,
+                          localResult.sweepTimeMs, threatLevelStr(threat));
             xSemaphoreGive(serialMutex);
         }
 
@@ -200,6 +225,7 @@ void setup() {
     }
 
     integrityInit();
+    detectionEngineInit();
     initCompassBus();
 
     // Create FreeRTOS primitives

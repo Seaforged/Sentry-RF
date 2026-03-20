@@ -8,11 +8,19 @@
 #include "gps_manager.h"
 #include "gnss_integrity.h"
 
+enum ThreatLevel : uint8_t {
+    THREAT_CLEAR    = 0,
+    THREAT_ADVISORY = 1,
+    THREAT_WARNING  = 2,
+    THREAT_CRITICAL = 3
+};
+
 // Shared state protected by stateMutex — copy under lock, process outside lock
 struct SystemState {
     ScanResult      spectrum;
     GpsData         gps;
     IntegrityStatus integrity;
+    ThreatLevel     threatLevel;
     unsigned long   lastSweepMs;
     unsigned long   lastGpsMs;
 };
