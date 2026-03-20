@@ -1,5 +1,6 @@
 #include "rf_scanner.h"
 #include "board_config.h"
+#include "gps_manager.h"
 #include <Arduino.h>
 
 int scannerInit(SX1262& radio) {
@@ -37,6 +38,9 @@ void scannerSweep(SX1262& radio, ScanResult& result) {
             result.peakRSSI = result.rssi[i];
             result.peakFreq = freq;
         }
+
+        // Drain GPS UART mid-sweep — prevents buffer overflow during 457ms scan
+        if (i % 50 == 0) gpsProcess();
     }
 
     result.sweepTimeMs = millis() - startTime;

@@ -131,3 +131,55 @@ void displayGPS(Adafruit_SSD1306& disp, const GpsData& data) {
 
     disp.display();
 }
+
+static const char* jammingStr(uint8_t state) {
+    switch (state) {
+        case 1:  return "OK";
+        case 2:  return "WARN";
+        case 3:  return "CRIT";
+        default: return "UNK";
+    }
+}
+
+static const char* spoofStr(uint8_t state) {
+    switch (state) {
+        case 1:  return "Clean";
+        case 2:  return "Indicated";
+        case 3:  return "Multiple";
+        default: return "Unknown";
+    }
+}
+
+static const char* threatStr(uint8_t level) {
+    switch (level) {
+        case 0:  return "CLEAR";
+        case 1:  return "ADVISORY";
+        case 2:  return "WARNING";
+        case 3:  return "CRITICAL";
+        default: return "?";
+    }
+}
+
+void displayIntegrity(Adafruit_SSD1306& disp, const GpsData& gps,
+                      const IntegrityStatus& status) {
+    disp.clearDisplay();
+    disp.setTextSize(1);
+    disp.setTextColor(SSD1306_WHITE);
+
+    disp.setCursor(0, 0);
+    disp.printf("GNSS INTEGRITY");
+
+    disp.setCursor(0, 12);
+    disp.printf("Jam: %s  JamI:%d", jammingStr(gps.jammingState), gps.jamInd);
+
+    disp.setCursor(0, 24);
+    disp.printf("Spoof: %s", spoofStr(gps.spoofDetState));
+
+    disp.setCursor(0, 36);
+    disp.printf("C/N0sd:%.1f AGC:%d%%", status.cnoStdDev, gps.agcPercent);
+
+    disp.setCursor(0, 52);
+    disp.printf("Threat: %s", threatStr(status.threatLevel));
+
+    disp.display();
+}

@@ -4,6 +4,7 @@
 #include <Adafruit_SSD1306.h>
 #include "rf_scanner.h"
 #include "gps_manager.h"
+#include "gnss_integrity.h"
 
 static const int SCREEN_WIDTH  = 128;
 static const int SCREEN_HEIGHT = 64;
@@ -28,5 +29,9 @@ void displaySpectrum(Adafruit_SSD1306& disp, const ScanResult& result);
 
 // Render GPS status screen: fix type, satellites, coordinates
 void displayGPS(Adafruit_SSD1306& disp, const GpsData& data);
+
+// Render GNSS integrity screen: jamming, spoofing, threat level
+void displayIntegrity(Adafruit_SSD1306& disp, const GpsData& gps,
+                      const IntegrityStatus& status);
 
 #endif // DISPLAY_H

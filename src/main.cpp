@@ -7,6 +7,7 @@
 #include "version.h"
 #include "rf_scanner.h"
 #include "gps_manager.h"
+#include "gnss_integrity.h"
 #include "display.h"
 
 // LoRa radio on custom SPI pins
@@ -19,6 +20,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, PIN_OLED_RST);
 // Shared data
 ScanResult scanResult;
 GpsData gpsData = {};
+IntegrityStatus integrityStatus = {};
 
 // Alternate OLED between spectrum and GPS every N loops
 static const int DISPLAY_SWAP_INTERVAL = 5;
@@ -93,14 +95,20 @@ void setup() {
         Serial.println("[INIT] GPS init failed — continuing without GPS");
     }
 
+    // GNSS integrity monitor
+    integrityInit();
+
     // Compass I2C bus (T3S3 only, read in future sprint)
     initCompassBus();
 
     digitalWrite(PIN_LED, LOW);
-    Serial.println("[INIT] Ready — scanning + GPS active");
+    Serial.println("[INIT] Ready — scanning + GPS + integrity active");
 }
 
 void loop() {
+    // Drain GPS UART buffer every iteration — must run before anything else
+    gpsProcess();
+
     digitalWrite(PIN_LED, HIGH);
 
     // RF sweep
@@ -112,11 +120,18 @@ void loop() {
     gpsUpdate(gpsData);
     gpsPrintStatus(gpsData);
 
-    // Alternate OLED between spectrum chart and GPS status
-    if ((loopCount % DISPLAY_SWAP_INTERVAL) == 0) {
+    // GNSS integrity analysis
+    integrityUpdate(gpsData, integrityStatus);
+    integrityPrintStatus(integrityStatus, gpsData);
+
+    // Rotate OLED: spectrum → GPS → integrity (5 loops each)
+    int screen = (loopCount / DISPLAY_SWAP_INTERVAL) % 3;
+    if (screen == 0) {
+        displaySpectrum(display, scanResult);
+    } else if (screen == 1) {
         displayGPS(display, gpsData);
     } else {
-        displaySpectrum(display, scanResult);
+        displayIntegrity(display, gpsData, integrityStatus);
     }
     loopCount++;
 
