@@ -3,6 +3,9 @@
 .pioenvs/
 .piolibdeps/
 
+# Development tool config
+.claude/
+
 # VS Code
 .vscode/
 *.code-workspace
