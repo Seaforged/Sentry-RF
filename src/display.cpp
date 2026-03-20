@@ -4,6 +4,14 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+static const char* fixTypeStr(uint8_t fixType) {
+    switch (fixType) {
+        case 2:  return "2D";
+        case 3:  return "3D";
+        default: return "None";
+    }
+}
+
 void displayInit(Adafruit_SSD1306& disp) {
     // Heltec V3: Vext pin controls OLED power rail
     if (HAS_OLED_VEXT) {
@@ -93,6 +101,33 @@ void displaySpectrum(Adafruit_SSD1306& disp, const ScanResult& result) {
 
     disp.setCursor(0, TEXT_Y_OFFSET + 9);
     disp.printf("860-930MHz  %lums", result.sweepTimeMs);
+
+    disp.display();
+}
+
+void displayGPS(Adafruit_SSD1306& disp, const GpsData& data) {
+    disp.clearDisplay();
+    disp.setTextSize(1);
+    disp.setTextColor(SSD1306_WHITE);
+
+    disp.setCursor(0, 0);
+    disp.printf("GPS  Fix:%s  SVs:%d", fixTypeStr(data.fixType), data.numSV);
+
+    if (!data.valid || data.fixType < 2) {
+        disp.setCursor(0, 20);
+        disp.println("Acquiring...");
+        disp.setCursor(0, 36);
+        disp.printf("Searching %d sats", data.numSV);
+    } else {
+        disp.setCursor(0, 16);
+        disp.printf("Lat: %.6f", data.latDeg7 / 1e7);
+        disp.setCursor(0, 28);
+        disp.printf("Lon: %.6f", data.lonDeg7 / 1e7);
+        disp.setCursor(0, 40);
+        disp.printf("Alt: %dm", data.altMM / 1000);
+        disp.setCursor(0, 52);
+        disp.printf("pDOP: %.2f", data.pDOP / 100.0);
+    }
 
     disp.display();
 }

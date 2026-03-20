@@ -6,6 +6,7 @@
 #include "board_config.h"
 #include "version.h"
 #include "rf_scanner.h"
+#include "gps_manager.h"
 #include "display.h"
 
 // LoRa radio on custom SPI pins
@@ -15,8 +16,13 @@ SX1262 radio = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUS
 // OLED display on I2C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, PIN_OLED_RST);
 
-// Scan results buffer
+// Shared data
 ScanResult scanResult;
+GpsData gpsData = {};
+
+// Alternate OLED between spectrum and GPS every N loops
+static const int DISPLAY_SWAP_INTERVAL = 5;
+static int loopCount = 0;
 
 int initRadioHardware() {
     loraSPI.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
@@ -31,6 +37,17 @@ int initRadioHardware() {
     }
 
     return RADIOLIB_ERR_NONE;
+}
+
+void initCompassBus() {
+    // Second I2C bus for compass — separate from OLED to avoid clock conflicts
+#ifdef BOARD_T3S3
+    if (HAS_COMPASS) {
+        Wire1.begin(PIN_COMPASS_SDA, PIN_COMPASS_SCL);
+        Serial.printf("[I2C1] Compass bus on SDA=%d SCL=%d\n",
+                      PIN_COMPASS_SDA, PIN_COMPASS_SCL);
+    }
+#endif
 }
 
 void printBanner() {
@@ -71,25 +88,38 @@ void setup() {
         return;
     }
 
-    // GPS UART — port open only, full init in Sprint 3
-    Serial1.begin(GPS_BAUD_DEFAULT, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
-    Serial.printf("[GPS] UART1 open at %d baud (RX=%d, TX=%d)\n",
-                  GPS_BAUD_DEFAULT, PIN_GPS_RX, PIN_GPS_TX);
+    // GPS: configure UBX mode and bump baud to 38400
+    if (!gpsInit()) {
+        Serial.println("[INIT] GPS init failed — continuing without GPS");
+    }
+
+    // Compass I2C bus (T3S3 only, read in future sprint)
+    initCompassBus();
 
     digitalWrite(PIN_LED, LOW);
-    Serial.println("[INIT] Ready — starting spectrum sweep");
+    Serial.println("[INIT] Ready — scanning + GPS active");
 }
 
 void loop() {
     digitalWrite(PIN_LED, HIGH);
 
+    // RF sweep
     scannerSweep(radio, scanResult);
     scannerPrintCSV(scanResult);
     scannerPrintSummary(scanResult);
-    displaySpectrum(display, scanResult);
+
+    // GPS poll (rate-limited internally to 1 Hz)
+    gpsUpdate(gpsData);
+    gpsPrintStatus(gpsData);
+
+    // Alternate OLED between spectrum chart and GPS status
+    if ((loopCount % DISPLAY_SWAP_INTERVAL) == 0) {
+        displayGPS(display, gpsData);
+    } else {
+        displaySpectrum(display, scanResult);
+    }
+    loopCount++;
 
     digitalWrite(PIN_LED, LOW);
-
-    // Brief pause between sweeps so serial output stays readable
     delay(100);
 }

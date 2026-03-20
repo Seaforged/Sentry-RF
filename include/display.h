@@ -3,6 +3,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "rf_scanner.h"
+#include "gps_manager.h"
 
 static const int SCREEN_WIDTH  = 128;
 static const int SCREEN_HEIGHT = 64;
@@ -24,5 +25,8 @@ void displayBootSplash(Adafruit_SSD1306& disp);
 
 // Render spectrum bar chart with peak info text
 void displaySpectrum(Adafruit_SSD1306& disp, const ScanResult& result);
+
+// Render GPS status screen: fix type, satellites, coordinates
+void displayGPS(Adafruit_SSD1306& disp, const GpsData& data);
 
 #endif // DISPLAY_H
