@@ -1,4 +1,4 @@
-# SENTRY-RF — Claude Code Project Context
+# SENTRY-RF — Developer Context
 
 ## What is this project?
 SENTRY-RF is an open-source, ESP32-based passive drone RF detector and GNSS jamming/spoofing detector. It combines sub-GHz spectrum scanning (via SX1262 LoRa radio) with GNSS integrity monitoring (via u-blox M10 GPS with UBX binary protocol) to detect drone activity and electronic warfare threats in the field.

@@ -26,7 +26,6 @@ struct SystemState {
     IntegrityStatus integrity;
     ThreatLevel     threatLevel;
     bool            wifiScannerActive;
-    bool            dashboardActive;
     CompassData     compass;
     uint8_t         batteryPercent;
     unsigned long   lastSweepMs;

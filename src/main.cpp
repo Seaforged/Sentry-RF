@@ -14,7 +14,6 @@
 #include "display.h"
 #include "detection_engine.h"
 #include "data_logger.h"
-#include "wifi_dashboard.h"
 #include "wifi_scanner.h"
 #include "alert_handler.h"
 
@@ -216,8 +215,7 @@ static void displayTask(void* param) {
     unsigned long lastAdvanceMs = millis();
     bool buttonWasDown = false;
     unsigned long buttonDownMs = 0;
-    bool dashboardMode = false;
-    unsigned long lastShortPressMs = 0;  // for double-press calibration detection
+    unsigned long lastShortPressMs = 0;
     unsigned long calDisplayStartMs = 0;
     bool wasCalibrating = false;
 
@@ -229,42 +227,10 @@ static void displayTask(void* param) {
                 buttonDownMs = millis();
                 buttonWasDown = true;
             }
-
-            unsigned long held = millis() - buttonDownMs;
-
-            // Show countdown on OLED while holding for dashboard mode
-            if (held > 1000 && !dashboardMode) {
-                int remaining = 5 - (int)(held / 1000);
-                if (remaining > 0) {
-                    oled.clearDisplay();
-                    oled.setTextSize(1);
-                    oled.setTextColor(SSD1306_WHITE);
-                    oled.setCursor(10, 24);
-                    oled.printf("Dashboard in %d...", remaining);
-                    oled.display();
-                }
-            }
-
-            // 5-second hold: switch to dashboard mode
-            if (held >= 5000 && !dashboardMode) {
-                wifiScannerStop();
-                dashboardInit();
-                dashboardMode = true;
-                if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    systemState.wifiScannerActive = false;
-                    systemState.dashboardActive = true;
-                    xSemaphoreGive(stateMutex);
-                }
-                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    Serial.println("[UI] Dashboard mode activated — power cycle to resume scanning");
-                    xSemaphoreGive(serialMutex);
-                }
-            }
         } else {
-            if (buttonWasDown && !dashboardMode) {
+            if (buttonWasDown) {
                 unsigned long held = millis() - buttonDownMs;
                 if (held >= 100 && held < 1000) {
-                    // Double-press within 500ms: toggle compass calibration
                     if (lastShortPressMs > 0 && millis() - lastShortPressMs < 500) {
                         compassStartCalibration();
                         if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -273,14 +239,9 @@ static void displayTask(void* param) {
                         }
                         lastShortPressMs = 0;
                     } else {
-                        // Single press: advance screen
                         currentScreen = (currentScreen + 1) % NUM_SCREENS;
                         lastAdvanceMs = millis();
                         lastShortPressMs = millis();
-                        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                            Serial.printf("[UI] Button press — screen %d\n", currentScreen);
-                            xSemaphoreGive(serialMutex);
-                        }
                     }
                 }
             }
@@ -288,7 +249,7 @@ static void displayTask(void* param) {
         }
 
         // Auto-rotate every 5 seconds if no button press
-        if (!dashboardMode && (millis() - lastAdvanceMs > 5000)) {
+        if (millis() - lastAdvanceMs > 5000) {
             currentScreen = (currentScreen + 1) % NUM_SCREENS;
             lastAdvanceMs = millis();
         }
@@ -311,44 +272,26 @@ static void displayTask(void* param) {
             xSemaphoreGive(stateMutex);
         }
 
-        if (!dashboardMode) {
-            if (compassIsCalibrating()) {
-                if (!wasCalibrating) {
-                    calDisplayStartMs = millis();
-                    wasCalibrating = true;
-                }
-                unsigned long elapsed = (millis() - calDisplayStartMs) / 1000;
-                oled.clearDisplay();
-                oled.setTextSize(1);
-                oled.setTextColor(SSD1306_WHITE);
-                oled.setCursor(10, 8);
-                oled.println("CALIBRATING");
-                oled.setCursor(10, 24);
-                oled.printf("Rotate 360%c (%lus)", 0xF8, elapsed);
-                oled.setCursor(10, 44);
-                oled.println("Double-press to stop");
-                oled.display();
-            } else {
-                wasCalibrating = false;
-                screens[currentScreen](oled, local, currentScreen);
+        // Render — calibration overlay or normal screen
+        if (compassIsCalibrating()) {
+            if (!wasCalibrating) {
+                calDisplayStartMs = millis();
+                wasCalibrating = true;
             }
-        } else {
-            // Dashboard mode: serve HTTP + show status on OLED
-            dashboardUpdateState(local);
-            dashboardHandle();
-
+            unsigned long elapsed = (millis() - calDisplayStartMs) / 1000;
             oled.clearDisplay();
             oled.setTextSize(1);
             oled.setTextColor(SSD1306_WHITE);
-            oled.setCursor(0, 0);
-            oled.println("DASHBOARD MODE");
-            oled.setCursor(0, 16);
-            oled.println("SSID: SENTRY-RF");
-            oled.setCursor(0, 28);
-            oled.println("http://192.168.4.1");
-            oled.setCursor(0, 44);
-            oled.println("Reset to scan mode");
+            oled.setCursor(10, 8);
+            oled.println("CALIBRATING");
+            oled.setCursor(10, 24);
+            oled.printf("Rotate 360%c (%lus)", 0xF8, elapsed);
+            oled.setCursor(10, 44);
+            oled.println("Double-press to stop");
             oled.display();
+        } else {
+            wasCalibrating = false;
+            screens[currentScreen](oled, local, currentScreen);
         }
 
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -412,7 +355,7 @@ void setup() {
     detectionEngineInit();
     loggerInit();
 
-    // Default to WiFi scanner mode — dashboard only activates on 5-second button hold
+    // WiFi radio dedicated to promiscuous scanning for drone Remote ID
     wifiScannerInit();
 
     initCompassBus();
@@ -439,7 +382,6 @@ void setup() {
 
     // Set initial WiFi mode
     systemState.wifiScannerActive = true;
-    systemState.dashboardActive = false;
 
     digitalWrite(PIN_LED, LOW);
     Serial.println("[INIT] FreeRTOS tasks launched — LoRa:Core1, GPS+WiFi:Core0");

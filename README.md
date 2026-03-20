@@ -44,21 +44,18 @@ All boards use ESP32-S3 with FreeRTOS dual-core: LoRa scanning on Core 1, GPS + 
 - QMC5883L compass module — connected via QWIIC/I2C for RF direction finding (T3S3 boards only)
 - SD card — for CSV data logging (T3S3 boards)
 
-### Wiring — GPS Module
+### Wiring — GPS Module (FlyFishRC M10QMC or similar)
 
-| GPS Pin | T3S3 GPIO | Heltec V3 GPIO |
-|---------|-----------|----------------|
-| TX | 44 (RX) | 46 (RX) |
-| RX | 43 (TX) | 45 (TX) |
-| VCC | 3.3V | 3.3V |
-| GND | GND | GND |
+| GPS Module Pin | T3S3 GPIO | Heltec V3 GPIO | Notes |
+|----------------|-----------|----------------|-------|
+| TX | 44 (RX) | 46 (RX) | GPS transmit → ESP32 receive |
+| RX | 43 (TX) | 45 (TX) | GPS receive ← ESP32 transmit |
+| SDA | 21 (Wire1) | N/A | Compass I2C — T3S3 only |
+| SCL | 10 (Wire1) | N/A | Compass I2C — T3S3 only |
+| VCC | 3.3V | 3.3V | |
+| GND | GND | GND | |
 
-### Wiring — Compass (T3S3 only, via QWIIC)
-
-| Compass | GPIO |
-|---------|------|
-| SDA | 21 |
-| SCL | 10 |
+If using a GPS module without a built-in compass, only TX/RX/VCC/GND are needed.
 
 ## Quick Start
 

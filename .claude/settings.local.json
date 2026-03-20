@@ -20,7 +20,9 @@
       "Bash(grep -E \"\\\\.h$\")",
       "Bash(grep -r \"MON_RF\\\\|MON.RF\\\\|setAutoMON.*RF\" '/c/Projects/Sentry-RF/.pio/libdeps/t3s3/SparkFun u-blox GNSS v3/src/' --include=*.h)",
       "Bash(taskkill //F //IM platformio-device-monitor.exe)",
-      "Bash(taskkill //F //IM pio.exe)"
+      "Bash(taskkill //F //IM pio.exe)",
+      "Bash(git rm:*)",
+      "Bash(rm -f \"/c/Projects/Sentry-RF/README \\(1\\).md\" \"/c/Projects/Sentry-RF/download \\(5\\).png\")"
     ]
   }
 }

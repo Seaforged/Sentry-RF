@@ -157,9 +157,7 @@ void screenDashboard(Adafruit_SSD1306& disp, const SystemState& state, int page)
 
     // Line 4: Battery + WiFi mode + compass
     disp.setCursor(0, 42);
-    disp.printf("Bat:%d%%  WiFi:%s",
-                state.batteryPercent,
-                state.dashboardActive ? "AP" : "SCAN");
+    disp.printf("Bat:%d%%  WiFi:SCAN", state.batteryPercent);
     if (state.compass.valid) {
         disp.printf(" %d%c", (int)state.compass.heading, 0xF8);
     }
