@@ -8,25 +8,16 @@ static SFE_UBLOX_GNSS_SERIAL gps;
 static unsigned long lastPollMs = 0;
 static const unsigned long GPS_POLL_INTERVAL_MS = 1000;
 
-// Indoor-safe C/N0 minimum — 6 dB-Hz filters noise without rejecting weak but
-// valid satellites. Raise to 15-20 for outdoor field deployments.
-static const uint8_t GPS_MIN_CNO = 6;
+// Production C/N0 minimum — 15 dB-Hz rejects noise while keeping usable satellites.
+// For indoor bench testing, temporarily lower to 6.
+// WARNING: Values below 10 will allow weak/multipath signals into the fix,
+// degrading position accuracy and integrity monitoring reliability.
+static const uint8_t GPS_MIN_CNO = 15;
 
 static bool connectAtBaud(uint32_t baud) {
     Serial1.begin(baud, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
     delay(100);
     return gps.begin(Serial1);
-}
-
-// Check if our RAM_BBR settings survived from a previous boot — if so we can
-// skip the full reconfiguration and preserve the module's satellite tracking state.
-static bool isAlreadyConfigured() {
-    uint8_t navFreq = gps.getNavigationFrequency();
-    if (navFreq != 1) return false;
-
-    uint8_t minCno = 0;
-    gps.getVal8(UBLOX_CFG_NAVSPG_INFIL_MINCNO, &minCno, VAL_LAYER_RAM);
-    return (minCno == GPS_MIN_CNO);
 }
 
 // Setup library-side auto callbacks — these tell the SparkFun library to parse
@@ -106,16 +97,12 @@ bool gpsInit() {
     // overflow during the ~457ms LoRa sweep at 38400 baud
     Serial1.setRxBufferSize(1024);
 
-    // Try target baud first — module may already be configured from a previous boot
+    // Always run full configuration — ensures MON-HW/NAV-STATUS/NAV-SAT are enabled.
+    // The isAlreadyConfigured() fast path was removed because it skipped module-side
+    // message output configuration, causing MON-HW to never populate (Jam:--- bug).
+    // Satellite tracking state survives reconfiguration via RAM_BBR layer.
     if (connectAtBaud(GPS_BAUD_TARGET)) {
-        if (isAlreadyConfigured()) {
-            Serial.printf("[GPS] Connected at %d baud — already configured, skipping reconfig\n",
-                          GPS_BAUD_TARGET);
-            setupLibraryState();
-            return true;
-        }
-
-        Serial.printf("[GPS] Connected at %d baud — config stale, reconfiguring\n", GPS_BAUD_TARGET);
+        Serial.printf("[GPS] Connected at %d baud — configuring\n", GPS_BAUD_TARGET);
         return configureUBX();
     }
 

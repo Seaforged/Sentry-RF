@@ -355,7 +355,10 @@ static void displayTask(void* param) {
     }
 }
 
-// Print stack high-water marks — called once 30s after boot
+// Boot counter persists across soft resets via RTC memory
+RTC_NOINIT_ATTR static uint32_t bootCount;
+
+// Print stack high-water marks + heap — called once 30s after boot
 static void printStackStats() {
     if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         Serial.println("[STACK] High-water marks (bytes free):");
@@ -363,6 +366,7 @@ static void printStackStats() {
         Serial.printf("  GPS:     %u / %u\n", uxTaskGetStackHighWaterMark(hGPSTask) * 4, STACK_GPS_READ);
         Serial.printf("  Display: %u / %u\n", uxTaskGetStackHighWaterMark(hDisplayTask) * 4, STACK_DISPLAY);
         Serial.printf("  Alert:   %u / %u\n", uxTaskGetStackHighWaterMark(hAlertTask) * 4, STACK_ALERT);
+        Serial.printf("[HEAP] Free: %u bytes (min: %u)\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
         xSemaphoreGive(serialMutex);
     }
 }
@@ -372,6 +376,11 @@ static void printStackStats() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
+
+    // Boot counter — tracks resets for stability monitoring
+    if (bootCount > 1000) bootCount = 0;
+    bootCount++;
+    Serial.printf("[BOOT] Boot #%u\n", bootCount);
 
     printBanner();
 
@@ -437,11 +446,22 @@ void setup() {
 }
 
 void loop() {
-    // Print stack stats once after 30 seconds, then sleep forever
+    // Print stack stats once after 30 seconds
     static bool statsPrinted = false;
     if (!statsPrinted && millis() > 30000) {
         printStackStats();
         statsPrinted = true;
+    }
+
+    // Periodic heap monitoring — detect memory leaks over time
+    static unsigned long lastHeapPrint = 0;
+    if (millis() - lastHeapPrint > 300000) {
+        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            Serial.printf("[HEAP] Free: %u bytes (min: %u)\n",
+                          ESP.getFreeHeap(), ESP.getMinFreeHeap());
+            xSemaphoreGive(serialMutex);
+        }
+        lastHeapPrint = millis();
     }
 
     vTaskDelay(pdMS_TO_TICKS(1000));
