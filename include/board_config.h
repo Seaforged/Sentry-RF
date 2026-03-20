@@ -25,6 +25,10 @@ static const int PIN_OLED_SCL = 17;
 static const int PIN_OLED_RST = -1;  // T3S3 has no OLED reset pin
 static const int PIN_OLED_VEXT = -1; // T3S3 has no Vext control
 
+// Compass QMC5883L I2C — connected via QWIIC connector (GPIO 10/21)
+static const int PIN_COMPASS_SDA = 21;
+static const int PIN_COMPASS_SCL = 10;
+
 // GPS UART1
 static const int PIN_GPS_RX = 44;
 static const int PIN_GPS_TX = 43;
@@ -38,6 +42,7 @@ static const bool HAS_OLED_VEXT = false;
 static const bool HAS_TCXO      = false;
 static const bool HAS_PSRAM     = true;
 static const bool HAS_SD_CARD   = true;
+static const bool HAS_COMPASS   = true;
 
 #elif defined(BOARD_HELTEC_V3)
 // ----- Heltec WiFi LoRa 32 V3 -----
@@ -70,6 +75,7 @@ static const bool HAS_OLED_VEXT = true;
 static const bool HAS_TCXO      = true;  // Must call setTCXO(1.8) before begin()
 static const bool HAS_PSRAM     = false;
 static const bool HAS_SD_CARD   = false;
+static const bool HAS_COMPASS   = false;
 
 #else
 #error "No board defined! Use -DBOARD_T3S3 or -DBOARD_HELTEC_V3"
