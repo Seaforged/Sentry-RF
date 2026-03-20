@@ -215,6 +215,8 @@ static void displayTask(void* param) {
     unsigned long buttonDownMs = 0;
     bool dashboardMode = false;
     unsigned long lastShortPressMs = 0;  // for double-press calibration detection
+    unsigned long calDisplayStartMs = 0;
+    bool wasCalibrating = false;
 
     for (;;) {
         bool buttonDown = (digitalRead(PIN_BOOT) == LOW);
@@ -296,19 +298,23 @@ static void displayTask(void* param) {
 
         if (!dashboardMode) {
             if (compassIsCalibrating()) {
-                // Calibration overlay replaces normal screen
-                unsigned long elapsed = (millis() - local.compass.peakTimestamp);
+                if (!wasCalibrating) {
+                    calDisplayStartMs = millis();
+                    wasCalibrating = true;
+                }
+                unsigned long elapsed = (millis() - calDisplayStartMs) / 1000;
                 oled.clearDisplay();
                 oled.setTextSize(1);
                 oled.setTextColor(SSD1306_WHITE);
                 oled.setCursor(10, 8);
                 oled.println("CALIBRATING");
                 oled.setCursor(10, 24);
-                oled.println("Rotate 360 degrees");
+                oled.printf("Rotate 360%c (%lus)", 0xF8, elapsed);
                 oled.setCursor(10, 44);
                 oled.println("Double-press to stop");
                 oled.display();
             } else {
+                wasCalibrating = false;
                 screens[currentScreen](oled, local, currentScreen);
             }
         } else {
