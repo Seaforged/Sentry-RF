@@ -28,6 +28,7 @@ struct SystemState {
     bool            wifiScannerActive;
     bool            dashboardActive;
     CompassData     compass;
+    uint8_t         batteryPercent;
     unsigned long   lastSweepMs;
     unsigned long   lastGpsMs;
 };

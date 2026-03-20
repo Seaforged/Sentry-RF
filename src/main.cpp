@@ -203,7 +203,10 @@ static void gpsReadTask(void* param) {
 // Screen render dispatch — one function per screen, all take the same signature
 typedef void (*ScreenFn)(Adafruit_SSD1306&, const SystemState&, int);
 static const ScreenFn screens[] = {
-    screenSpectrum, screenGPS, screenIntegrity, screenThreat, screenSystem
+    screenDashboard, screenSpectrum, screenGPS, screenIntegrity, screenThreat, screenSystem
+#ifdef BOARD_T3S3_LR1121
+    , screenSpectrum24
+#endif
 };
 
 // Core 1 — OLED I2C and BOOT button only touched here
@@ -260,9 +263,9 @@ static void displayTask(void* param) {
         } else {
             if (buttonWasDown && !dashboardMode) {
                 unsigned long held = millis() - buttonDownMs;
-                if (held < 1000) {
+                if (held >= 100 && held < 1000) {
                     // Double-press within 500ms: toggle compass calibration
-                    if (millis() - lastShortPressMs < 500) {
+                    if (lastShortPressMs > 0 && millis() - lastShortPressMs < 500) {
                         compassStartCalibration();
                         if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                             Serial.println("[UI] Double-press — calibration toggle");
@@ -289,6 +292,18 @@ static void displayTask(void* param) {
             currentScreen = (currentScreen + 1) % NUM_SCREENS;
             lastAdvanceMs = millis();
         }
+
+        // Battery voltage on GPIO 1 (T3S3 voltage divider halves battery voltage)
+#if defined(BOARD_T3S3) || defined(BOARD_T3S3_LR1121)
+        {
+            float voltage = analogReadMilliVolts(1) * 2.0 / 1000.0;
+            int pct = (int)((voltage - 3.0) / (4.2 - 3.0) * 100.0);
+            if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                systemState.batteryPercent = constrain(pct, 0, 100);
+                xSemaphoreGive(stateMutex);
+            }
+        }
+#endif
 
         // Snapshot shared state under lock
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {

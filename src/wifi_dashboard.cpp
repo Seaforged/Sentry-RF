@@ -80,7 +80,7 @@ void dashboardInit() {
     // softAP() sets WIFI_AP mode internally — no WiFi.mode() needed.
     // softAPConfig() removed — 192.168.4.1 is already the default, and calling
     // it before softAP() can crash on DHCP lease renewal (espressif#3906).
-    bool apOK = WiFi.softAP("SENTRY-RF", "sentryrf1", 1, 0, 4);
+    bool apOK = WiFi.softAP("SENTRY-RF", "SentryP@ssword", 1, 0, 4);
     if (!apOK) {
         Serial.printf("[WIFI] FAIL: softAP returned false (mode=%d)\n", WiFi.getMode());
         return;

@@ -1,6 +1,7 @@
 #include "display.h"
 #include "board_config.h"
 #include "version.h"
+#include "splash_logo.h"
 #include <Arduino.h>
 #include <Wire.h>
 
@@ -19,7 +20,7 @@ static const char* jammingStr(uint8_t state) {
         case 1:  return "OK";
         case 2:  return "WARN";
         case 3:  return "CRIT";
-        default: return "UNK";
+        default: return "---";
     }
 }
 
@@ -79,19 +80,9 @@ void displayInit(Adafruit_SSD1306& disp) {
 
 void displayBootSplash(Adafruit_SSD1306& disp) {
     disp.clearDisplay();
-    disp.setTextSize(1);
-    disp.setTextColor(SSD1306_WHITE);
-    disp.setCursor(0, 0);
-    disp.printf("%s v%s", FW_NAME, FW_VERSION);
-    disp.setCursor(0, 16);
-#if defined(BOARD_T3S3_LR1121)
-    disp.println("Board: T3S3 LR1121");
-#elif defined(BOARD_T3S3)
-    disp.println("Board: T3S3");
-#elif defined(BOARD_HELTEC_V3)
-    disp.println("Board: Heltec V3");
-#endif
+    disp.drawBitmap(0, 0, splash_logo, 128, 64, SSD1306_WHITE);
     disp.display();
+    delay(2000);
 }
 
 // ── Screen 0: Spectrum ──────────────────────────────────────────────────────
@@ -104,6 +95,80 @@ static int rssiToBarHeight(float rssi) {
     float normalized = (clamped - DISPLAY_RSSI_MIN) / (DISPLAY_RSSI_MAX - DISPLAY_RSSI_MIN);
     return (int)(normalized * CHART_HEIGHT);
 }
+
+// ── Mini spectrum bar helper (60px wide × 10px tall) ────────────────────────
+
+static void drawMiniSpectrum(Adafruit_SSD1306& disp, int x, int y, int w, int h,
+                             const float* rssi, int binCount) {
+    for (int col = 0; col < w; col++) {
+        int binStart = (col * binCount) / w;
+        int binEnd = ((col + 1) * binCount) / w;
+        float peak = -200.0;
+        for (int b = binStart; b < binEnd; b++) {
+            if (rssi[b] > peak) peak = rssi[b];
+        }
+        float clamped = constrain(peak, DISPLAY_RSSI_MIN, DISPLAY_RSSI_MAX);
+        int barH = (int)(((clamped - DISPLAY_RSSI_MIN) / (DISPLAY_RSSI_MAX - DISPLAY_RSSI_MIN)) * h);
+        if (barH > 0) {
+            disp.drawFastVLine(x + col, y + h - barH, barH, SSD1306_WHITE);
+        }
+    }
+}
+
+// ── Screen 0: Dashboard Summary ─────────────────────────────────────────────
+
+void screenDashboard(Adafruit_SSD1306& disp, const SystemState& state, int page) {
+    disp.clearDisplay();
+    disp.setTextSize(1);
+    disp.setTextColor(SSD1306_WHITE);
+
+    // Line 0: SENTRY-RF + threat level
+    disp.setCursor(0, 0);
+    disp.print("SENTRY-RF");
+    const char* tStr = threatStr(state.threatLevel);
+    int tWidth = strlen(tStr) * 6;
+    if (state.threatLevel >= THREAT_WARNING) {
+        disp.fillRect(128 - tWidth - 2, 0, tWidth + 2, 9, SSD1306_WHITE);
+        disp.setTextColor(SSD1306_BLACK);
+    }
+    disp.setCursor(128 - tWidth, 0);
+    disp.print(tStr);
+    disp.setTextColor(SSD1306_WHITE);
+
+    // Line 1: Mini spectrum bars
+    drawMiniSpectrum(disp, 0, 10, 60, 10, state.spectrum.rssi, SCAN_BIN_COUNT);
+    disp.setCursor(64, 10);
+    if (state.spectrum24.valid) {
+        drawMiniSpectrum(disp, 68, 10, 60, 10, state.spectrum24.rssi, SCAN_24_BIN_COUNT);
+    } else {
+        disp.print("2.4:N/A");
+    }
+
+    // Line 2: GPS + jamming + spoofing condensed (max 21 chars)
+    disp.setCursor(0, 22);
+    disp.printf("%s %dSV J:%s S:%s",
+                fixTypeStr(state.gps.fixType), state.gps.numSV,
+                jammingStr(state.gps.jammingState),
+                (state.gps.spoofDetState >= 2) ? "!" : "OK");
+
+    // Line 3: Sub-GHz peak (max 21 chars)
+    disp.setCursor(0, 32);
+    disp.printf("%.0fdB @%.0fM", state.spectrum.peakRSSI, state.spectrum.peakFreq);
+
+    // Line 4: Battery + WiFi mode + compass
+    disp.setCursor(0, 42);
+    disp.printf("Bat:%d%%  WiFi:%s",
+                state.batteryPercent,
+                state.dashboardActive ? "AP" : "SCAN");
+    if (state.compass.valid) {
+        disp.printf(" %d%c", (int)state.compass.heading, 0xF8);
+    }
+
+    drawPageDots(disp, page, NUM_SCREENS);
+    disp.display();
+}
+
+// ── Screen 1: Sub-GHz Spectrum ──────────────────────────────────────────────
 
 void screenSpectrum(Adafruit_SSD1306& disp, const SystemState& state, int page) {
     disp.clearDisplay();
@@ -127,7 +192,7 @@ void screenSpectrum(Adafruit_SSD1306& disp, const SystemState& state, int page) 
         }
     }
 
-    disp.setCursor(0, 53);
+    disp.setCursor(0, 51);
     disp.printf("Pk:%.1f %.0fdBm", state.spectrum.peakFreq, state.spectrum.peakRSSI);
 
     drawPageDots(disp, page, NUM_SCREENS);
@@ -150,7 +215,7 @@ void screenGPS(Adafruit_SSD1306& disp, const SystemState& state, int page) {
         disp.println("Acquiring...");
     } else {
         disp.setCursor(0, 12);
-        disp.printf("%.6f, %.6f", g.latDeg7 / 1e7, g.lonDeg7 / 1e7);
+        disp.printf("%.5f,%.5f", g.latDeg7 / 1e7, g.lonDeg7 / 1e7);
         disp.setCursor(0, 24);
         disp.printf("Alt:%dm  pDOP:%.1f", g.altMM / 1000, g.pDOP / 100.0);
         disp.setCursor(0, 36);
@@ -184,7 +249,12 @@ void screenIntegrity(Adafruit_SSD1306& disp, const SystemState& state, int page)
     disp.printf("Spoof: %s", spoofStr(state.gps.spoofDetState));
 
     disp.setCursor(0, 36);
-    disp.printf("C/N0sd:%.1f AGC:%d%%", state.integrity.cnoStdDev, state.gps.agcPercent);
+    disp.printf("C/N0sd:%.1f AGC:", state.integrity.cnoStdDev);
+    if (state.gps.jammingState == 0 && state.gps.agcPercent == 0) {
+        disp.print("--");
+    } else {
+        disp.printf("%d%%", state.gps.agcPercent);
+    }
 
     drawPageDots(disp, page, NUM_SCREENS);
     disp.display();
@@ -265,6 +335,35 @@ void screenSystem(Adafruit_SSD1306& disp, const SystemState& state, int page) {
     } else {
         disp.print("Compass: N/A");
     }
+
+    drawPageDots(disp, page, NUM_SCREENS);
+    disp.display();
+}
+
+// ── Screen 6: 2.4 GHz Spectrum (LR1121 only) ───────────────────────────────
+
+void screenSpectrum24(Adafruit_SSD1306& disp, const SystemState& state, int page) {
+    disp.clearDisplay();
+    disp.setTextSize(1);
+    disp.setTextColor(SSD1306_WHITE);
+
+    disp.setCursor(0, 0);
+    disp.print("2.4GHz 2400-2500MHz");
+
+    if (!state.spectrum24.valid) {
+        disp.setCursor(0, 28);
+        disp.print("2.4 GHz: No radio");
+        drawPageDots(disp, page, NUM_SCREENS);
+        disp.display();
+        return;
+    }
+
+    // Reuse mini spectrum helper at full width for the chart area
+    drawMiniSpectrum(disp, 0, CHART_Y_OFFSET, SCREEN_WIDTH, CHART_HEIGHT,
+                     state.spectrum24.rssi, SCAN_24_BIN_COUNT);
+
+    disp.setCursor(0, 53);
+    disp.printf("Pk:%.0f %.0fdBm", state.spectrum24.peakFreq, state.spectrum24.peakRSSI);
 
     drawPageDots(disp, page, NUM_SCREENS);
     disp.display();
