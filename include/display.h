@@ -2,21 +2,15 @@
 #define DISPLAY_H
 
 #include <Adafruit_SSD1306.h>
-#include "rf_scanner.h"
-#include "gps_manager.h"
-#include "gnss_integrity.h"
+#include "detection_types.h"
 
 static const int SCREEN_WIDTH  = 128;
 static const int SCREEN_HEIGHT = 64;
+static const int NUM_SCREENS   = 5;
 
 // RSSI range for bar chart vertical scaling
-static const float DISPLAY_RSSI_MIN = -120.0;  // bottom of chart
-static const float DISPLAY_RSSI_MAX = -40.0;   // top of chart
-
-// Chart layout: top portion for bars, bottom for text
-static const int CHART_HEIGHT   = 48;
-static const int CHART_Y_OFFSET = 0;
-static const int TEXT_Y_OFFSET  = 50;
+static const float DISPLAY_RSSI_MIN = -120.0;
+static const float DISPLAY_RSSI_MAX = -40.0;
 
 // Initialize OLED hardware (Vext, reset pulse, I2C)
 void displayInit(Adafruit_SSD1306& disp);
@@ -24,14 +18,22 @@ void displayInit(Adafruit_SSD1306& disp);
 // Show boot splash with firmware version and board name
 void displayBootSplash(Adafruit_SSD1306& disp);
 
-// Render spectrum bar chart with peak info text
-void displaySpectrum(Adafruit_SSD1306& disp, const ScanResult& result);
+// Screen 0: RF spectrum bar chart
+void screenSpectrum(Adafruit_SSD1306& disp, const SystemState& state, int page);
 
-// Render GPS status screen: fix type, satellites, coordinates
-void displayGPS(Adafruit_SSD1306& disp, const GpsData& data);
+// Screen 1: GPS position and fix info
+void screenGPS(Adafruit_SSD1306& disp, const SystemState& state, int page);
 
-// Render GNSS integrity screen: jamming, spoofing, threat level
-void displayIntegrity(Adafruit_SSD1306& disp, const GpsData& gps,
-                      const IntegrityStatus& status);
+// Screen 2: GNSS integrity (jamming/spoofing)
+void screenIntegrity(Adafruit_SSD1306& disp, const SystemState& state, int page);
+
+// Screen 3: Threat status and active detections
+void screenThreat(Adafruit_SSD1306& disp, const SystemState& state, int page);
+
+// Screen 4: System info (version, uptime, heap)
+void screenSystem(Adafruit_SSD1306& disp, const SystemState& state, int page);
+
+// Draw page indicator dots at bottom center
+void drawPageDots(Adafruit_SSD1306& disp, int current, int total);
 
 #endif // DISPLAY_H

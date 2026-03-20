@@ -33,8 +33,15 @@ static const int PIN_COMPASS_SCL = 10;
 static const int PIN_GPS_RX = 44;
 static const int PIN_GPS_TX = 43;
 
-// Status LED
-static const int PIN_LED = 37;
+// SD card SPI — separate bus from LoRa
+static const int PIN_SD_CS   = 13;
+static const int PIN_SD_SCK  = 14;
+static const int PIN_SD_MISO = 2;
+static const int PIN_SD_MOSI = 15;
+
+// Status LED and button
+static const int PIN_LED  = 37;
+static const int PIN_BOOT = 0;   // BOOT button, active LOW
 
 // Board capabilities
 static const bool HAS_OLED_RST  = false;
@@ -43,6 +50,7 @@ static const bool HAS_TCXO      = false;
 static const bool HAS_PSRAM     = true;
 static const bool HAS_SD_CARD   = true;
 static const bool HAS_COMPASS   = true;
+static const bool WIFI_ENABLED  = true;
 
 #elif defined(BOARD_HELTEC_V3)
 // ----- Heltec WiFi LoRa 32 V3 -----
@@ -66,8 +74,9 @@ static const int PIN_OLED_VEXT = 36;  // Set LOW to power OLED
 static const int PIN_GPS_RX = 46;
 static const int PIN_GPS_TX = 45;
 
-// Status LED
-static const int PIN_LED = 35;
+// Status LED and button
+static const int PIN_LED  = 35;
+static const int PIN_BOOT = 0;   // BOOT button, active LOW
 
 // Board capabilities
 static const bool HAS_OLED_RST  = true;
@@ -76,6 +85,7 @@ static const bool HAS_TCXO      = true;  // Must call setTCXO(1.8) before begin(
 static const bool HAS_PSRAM     = false;
 static const bool HAS_SD_CARD   = false;
 static const bool HAS_COMPASS   = false;
+static const bool WIFI_ENABLED  = true;
 
 #else
 #error "No board defined! Use -DBOARD_T3S3 or -DBOARD_HELTEC_V3"

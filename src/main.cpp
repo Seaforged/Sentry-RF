@@ -12,6 +12,8 @@
 #include "gnss_integrity.h"
 #include "display.h"
 #include "detection_engine.h"
+#include "data_logger.h"
+#include "wifi_dashboard.h"
 #include "alert_handler.h"
 
 // Hardware objects — each owned by exactly one task after setup()
@@ -86,6 +88,7 @@ static void loRaScanTask(void* param) {
     ScanResult localResult;
     GpsData snapGps = {};
     IntegrityStatus snapIntegrity = {};
+    uint32_t sweepNum = 0;
 
     for (;;) {
         scannerSweep(radio, localResult);
@@ -107,6 +110,9 @@ static void loRaScanTask(void* param) {
             systemState.threatLevel = threat;
             xSemaphoreGive(stateMutex);
         }
+
+        // Log to SD/SPIFFS — uses its own SPI bus (FSPI), no conflict with LoRa (HSPI)
+        loggerWrite(systemState, sweepNum++);
 
         if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             scannerPrintCSV(localResult);
@@ -152,30 +158,49 @@ static void gpsReadTask(void* param) {
     }
 }
 
-// Core 1 — OLED I2C is only touched here
+// Screen render dispatch — one function per screen, all take the same signature
+typedef void (*ScreenFn)(Adafruit_SSD1306&, const SystemState&, int);
+static const ScreenFn screens[] = {
+    screenSpectrum, screenGPS, screenIntegrity, screenThreat, screenSystem
+};
+
+// Core 1 — OLED I2C and BOOT button only touched here
 static void displayTask(void* param) {
-    // static — SystemState contains a 2800-byte RSSI array that blows the stack
     static SystemState local;
-    int frame = 0;
-    static const int FRAMES_PER_SCREEN = 25;  // 25 frames × 200ms = 5 sec per screen
+    int currentScreen = 0;
+    unsigned long lastButtonMs = 0;
+    unsigned long lastAdvanceMs = millis();
 
     for (;;) {
+        // Button: advance screen on press with 200ms debounce
+        if (digitalRead(PIN_BOOT) == LOW && (millis() - lastButtonMs > 100)) {
+            currentScreen = (currentScreen + 1) % NUM_SCREENS;
+            lastButtonMs = millis();
+            lastAdvanceMs = millis();
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                Serial.printf("[UI] Button press — screen %d\n", currentScreen);
+                xSemaphoreGive(serialMutex);
+            }
+        }
+
+        // Auto-rotate every 5 seconds if no button press
+        if (millis() - lastAdvanceMs > 5000) {
+            currentScreen = (currentScreen + 1) % NUM_SCREENS;
+            lastAdvanceMs = millis();
+        }
+
         // Snapshot shared state under lock
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             local = systemState;
             xSemaphoreGive(stateMutex);
         }
 
-        // Render outside lock — I2C transfer takes ~20ms
-        int screen = (frame / FRAMES_PER_SCREEN) % 3;
-        if (screen == 0) {
-            displaySpectrum(oled, local.spectrum);
-        } else if (screen == 1) {
-            displayGPS(oled, local.gps);
-        } else {
-            displayIntegrity(oled, local.gps, local.integrity);
-        }
-        frame++;
+        // Render current screen outside lock
+        screens[currentScreen](oled, local, currentScreen);
+
+        // WiFi dashboard — update state and serve HTTP from this task only
+        dashboardUpdateState(local);
+        dashboardHandle();
 
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -203,6 +228,7 @@ void setup() {
 
     pinMode(PIN_LED, OUTPUT);
     digitalWrite(PIN_LED, HIGH);
+    pinMode(PIN_BOOT, INPUT);  // External pull-up on GPIO 0 — no INPUT_PULLUP needed
 
     // Hardware init — all on Core 1 before tasks start
     displayInit(oled);
@@ -226,6 +252,8 @@ void setup() {
 
     integrityInit();
     detectionEngineInit();
+    loggerInit();
+    dashboardInit();
     initCompassBus();
 
     // Create FreeRTOS primitives
