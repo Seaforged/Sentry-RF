@@ -369,23 +369,20 @@ void setup() {
     printBanner();
 
     pinMode(PIN_LED, OUTPUT);
+    // Quick LED test — blink once to verify pin polarity
+    digitalWrite(PIN_LED, HIGH);
+    delay(150);
     digitalWrite(PIN_LED, LOW);
+    delay(150);
+    digitalWrite(PIN_LED, HIGH);
+    delay(150);
+    digitalWrite(PIN_LED, LOW);
+    Serial.println("[LED] Boot blink test done (should have blinked 2x)");
     pinMode(PIN_BOOT, INPUT);  // External pull-up on GPIO 0 — no INPUT_PULLUP needed
 
-    // Hardware init — all on Core 1 before tasks start
+    // Hardware init — splash stays on screen during entire init sequence
     displayInit(oled);
-    displayBootSplash(oled);
-
-    // Show "Booting..." on OLED during hardware init (replaces blank screen)
-    oled.clearDisplay();
-    oled.setTextSize(1);
-    oled.setTextColor(SSD1306_WHITE);
-    oled.setCursor(0, 0);
-    oled.print("SENTRY-RF v");
-    oled.print(FW_VERSION);
-    oled.setCursor(0, 16);
-    oled.print("Initializing...");
-    oled.display();
+    displayBootSplash(oled);  // Shows logo, stays visible until first screen renders
 
     int hwState = initRadioHardware();
     if (hwState != RADIOLIB_ERR_NONE) {
