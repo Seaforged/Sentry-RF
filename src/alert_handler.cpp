@@ -49,23 +49,26 @@ static const unsigned long REMINDER_INTERVAL  = 30000;   // 30 seconds
 static void updateLED(ThreatLevel level, bool acknowledged) {
     static unsigned long lastToggle = 0;
     static bool ledOn = false;
-    static ThreatLevel lastLoggedLevel = THREAT_CLEAR;
+    static unsigned long criticalSinceMs = 0;
+    static bool wasCritical = false;
     unsigned long now = millis();
 
-    // Log LED state changes
-    if (level != lastLoggedLevel) {
-        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-            Serial.printf("[LED] Level=%d ack=%d → LED %s\n",
-                          level, acknowledged,
-                          (level <= THREAT_ADVISORY && !acknowledged) ? "OFF" : "active");
-            xSemaphoreGive(serialMutex);
+    // Track how long CRITICAL has been sustained
+    if (level == THREAT_CRITICAL) {
+        if (!wasCritical) {
+            criticalSinceMs = now;
+            wasCritical = true;
         }
-        lastLoggedLevel = level;
+    } else {
+        wasCritical = false;
     }
 
-    if (level < THREAT_CRITICAL && !acknowledged) {
-        // CLEAR, ADVISORY, WARNING without ACK: LED OFF
-        // LED only activates at CRITICAL (confirmed multi-source drone threat)
+    // LED only activates after CRITICAL sustained for 5+ seconds
+    // This filters brief ambient spikes from triggering the LED
+    bool criticalConfirmed = wasCritical && (now - criticalSinceMs >= 5000);
+
+    if (!criticalConfirmed && !acknowledged) {
+        // Not a confirmed threat: LED OFF
         if (ledOn) {
             digitalWrite(PIN_LED, LOW);
             ledOn = false;
@@ -83,13 +86,11 @@ static void updateLED(ThreatLevel level, bool acknowledged) {
         return;
     }
 
-    // CRITICAL: fast blink
-    if (level == THREAT_CRITICAL) {
-        if (now - lastToggle >= 200) {
-            ledOn = !ledOn;
-            digitalWrite(PIN_LED, ledOn ? HIGH : LOW);
-            lastToggle = now;
-        }
+    // Confirmed CRITICAL: fast blink
+    if (now - lastToggle >= 200) {
+        ledOn = !ledOn;
+        digitalWrite(PIN_LED, ledOn ? HIGH : LOW);
+        lastToggle = now;
     }
 }
 

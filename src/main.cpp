@@ -417,13 +417,14 @@ void setup() {
     serialMutex = xSemaphoreCreateMutex();
     detectionQueue = xQueueCreate(10, sizeof(DetectionEvent));
 
-    // Launch tasks — GPS on Core 0, everything else on Core 1
+    // Launch tasks — LoRa on Core 1 (exclusive, uses busy-wait sweep)
+    // Display on Core 0 so OLED I2C transfers aren't starved by LoRa sweep
     xTaskCreatePinnedToCore(loRaScanTask, "LoRaScan", STACK_LORA_SCAN, nullptr,
                             PRIO_LORA_SCAN, &hLoRaTask, CORE_LORA);
     xTaskCreatePinnedToCore(gpsReadTask, "GPSRead", STACK_GPS_READ, nullptr,
                             PRIO_GPS_READ, &hGPSTask, CORE_GPS);
     xTaskCreatePinnedToCore(displayTask, "Display", STACK_DISPLAY, nullptr,
-                            PRIO_DISPLAY, &hDisplayTask, CORE_LORA);
+                            PRIO_DISPLAY, &hDisplayTask, CORE_GPS);
     xTaskCreatePinnedToCore(alertTask, "Alert", STACK_ALERT, nullptr,
                             PRIO_ALERT, &hAlertTask, CORE_GPS);
     xTaskCreatePinnedToCore(wifiScanTask, "WiFiScan", STACK_GPS_READ, nullptr,
