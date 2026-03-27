@@ -264,14 +264,14 @@ static const ScreenFn screens[] = {
 static void displayTask(void* param) {
     static SystemState local;
     int currentScreen = 0;
+    int lastRenderedScreen = -1;
     unsigned long lastAdvanceMs = millis();
+    unsigned long lastRenderMs = 0;
     bool buttonWasDown = false;
     unsigned long buttonDownMs = 0;
-    unsigned long calDisplayStartMs = 0;
-    bool wasCalibrating = false;
 
     for (;;) {
-        // ── Phase 1: Button input ──────────────────────────────
+        // ── Button input (polled at ~50ms) ─────────────────────
         bool buttonDown = (digitalRead(PIN_BOOT) == LOW);
 
         if (buttonDown) {
@@ -282,7 +282,6 @@ static void displayTask(void* param) {
         } else {
             if (buttonWasDown) {
                 unsigned long held = millis() - buttonDownMs;
-
                 if (held >= 3000) {
                     alertToggleMute();
                 } else if (held >= 1000) {
@@ -290,69 +289,50 @@ static void displayTask(void* param) {
                 } else if (held >= 100) {
                     currentScreen = (currentScreen + 1) % NUM_SCREENS;
                     lastAdvanceMs = millis();
+                    lastRenderedScreen = -1;  // force re-render
                 }
             }
             buttonWasDown = false;
         }
 
-        // Auto-rotate every 5 seconds
+        // ── Auto-rotate every 5 seconds ────────────────────────
         if (millis() - lastAdvanceMs > 5000) {
             currentScreen = (currentScreen + 1) % NUM_SCREENS;
-            unsigned long sinceLast = millis() - lastAdvanceMs;
             lastAdvanceMs = millis();
-            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                Serial.printf("[DISPLAY] Screen %d, %lums since last\n",
-                              currentScreen, sinceLast);
-                xSemaphoreGive(serialMutex);
-            }
+            lastRenderedScreen = -1;  // force re-render
         }
 
-        // ── Phase 2: Snapshot screen index + state ─────────────
-        // Capture screen index into a local so it can't change during render
-        int renderScreen = currentScreen;
+        // ── Render at 2 Hz (every 500ms) ───────────────────────
+        if (millis() - lastRenderMs >= 500) {
+            lastRenderMs = millis();
 
-        // Battery voltage
+            // Battery voltage
 #if defined(BOARD_T3S3) || defined(BOARD_T3S3_LR1121)
-        {
-            float voltage = analogReadMilliVolts(1) * 2.0 / 1000.0;
-            int pct = (int)((voltage - 3.0) / (4.2 - 3.0) * 100.0);
-            if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                systemState.batteryPercent = constrain(pct, 0, 100);
-                xSemaphoreGive(stateMutex);
+            {
+                float voltage = analogReadMilliVolts(1) * 2.0 / 1000.0;
+                int pct = (int)((voltage - 3.0) / (4.2 - 3.0) * 100.0);
+                if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                    systemState.batteryPercent = constrain(pct, 0, 100);
+                    xSemaphoreGive(stateMutex);
+                }
             }
-        }
 #endif
 
-        // Snapshot shared state under lock
-        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            local = systemState;
-            xSemaphoreGive(stateMutex);
-        }
-
-        // ── Phase 3: Render (uses frozen renderScreen + local) ─
-        if (compassIsCalibrating()) {
-            if (!wasCalibrating) {
-                calDisplayStartMs = millis();
-                wasCalibrating = true;
+            // Snapshot state
+            if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                local = systemState;
+                xSemaphoreGive(stateMutex);
             }
-            unsigned long elapsed = (millis() - calDisplayStartMs) / 1000;
-            oled.clearDisplay();
-            oled.setTextSize(1);
-            oled.setTextColor(SSD1306_WHITE);
-            oled.setCursor(10, 8);
-            oled.println("CALIBRATING");
-            oled.setCursor(10, 24);
-            oled.printf("Rotate 360%c (%lus)", 0xF8, elapsed);
-            oled.setCursor(10, 44);
-            oled.println("Hold 1s to stop");
-            oled.display();
-        } else {
-            wasCalibrating = false;
+
+            // Freeze screen index for this render
+            int renderScreen = currentScreen;
+
+            // Render one complete frame
             screens[renderScreen](oled, local, renderScreen);
+            lastRenderedScreen = renderScreen;
         }
 
-        // ── Phase 4: Delay ─────────────────────────────────────
-        vTaskDelay(pdMS_TO_TICKS(100));  // 10 Hz refresh (was 200ms/5Hz)
+        vTaskDelay(pdMS_TO_TICKS(50));  // 20 Hz button polling
     }
 }
 
@@ -376,7 +356,10 @@ static void printStackStats() {
 
 void setup() {
     Serial.begin(115200);
-    delay(500);
+    delay(300);
+
+    Serial.println();
+    Serial.println("========== SENTRY-RF v1.2.0-FIX4 ==========");
 
     // Boot counter — tracks resets for stability monitoring
     if (bootCount > 1000) bootCount = 0;
@@ -392,6 +375,17 @@ void setup() {
     // Hardware init — all on Core 1 before tasks start
     displayInit(oled);
     displayBootSplash(oled);
+
+    // Show "Booting..." on OLED during hardware init (replaces blank screen)
+    oled.clearDisplay();
+    oled.setTextSize(1);
+    oled.setTextColor(SSD1306_WHITE);
+    oled.setCursor(0, 0);
+    oled.print("SENTRY-RF v");
+    oled.print(FW_VERSION);
+    oled.setCursor(0, 16);
+    oled.print("Initializing...");
+    oled.display();
 
     int hwState = initRadioHardware();
     if (hwState != RADIOLIB_ERR_NONE) {

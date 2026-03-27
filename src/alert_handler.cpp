@@ -48,37 +48,44 @@ static const unsigned long REMINDER_INTERVAL  = 30000;   // 30 seconds
 
 static void updateLED(ThreatLevel level, bool acknowledged) {
     static unsigned long lastToggle = 0;
-    static bool ledState = false;
+    static bool ledOn = false;
     unsigned long now = millis();
 
-    if (acknowledged && level > THREAT_CLEAR) {
-        // ACK'd: slow blink regardless of level
+    if (level <= THREAT_ADVISORY && !acknowledged) {
+        // CLEAR or ADVISORY with no threat: LED always OFF
+        if (ledOn) {
+            digitalWrite(PIN_LED, LOW);
+            ledOn = false;
+        }
+        return;
+    }
+
+    if (acknowledged) {
+        // ACK'd: very slow blink (1 Hz) to confirm ACK received
         if (now - lastToggle >= 1000) {
-            ledState = !ledState;
-            digitalWrite(PIN_LED, ledState ? HIGH : LOW);
+            ledOn = !ledOn;
+            digitalWrite(PIN_LED, ledOn ? HIGH : LOW);
             lastToggle = now;
         }
         return;
     }
 
-    switch (level) {
-        case THREAT_CLEAR:
-        case THREAT_ADVISORY:
-            // LED off for CLEAR and ADVISORY (ambient ISM traffic)
-            digitalWrite(PIN_LED, LOW);
-            break;
-        case THREAT_WARNING:
-            // Fast blink at WARNING (confirmed drone signal)
-            if (now - lastToggle >= 125) {
-                ledState = !ledState;
-                digitalWrite(PIN_LED, ledState ? HIGH : LOW);
-                lastToggle = now;
-            }
-            break;
-        case THREAT_CRITICAL:
-            // Solid on at CRITICAL
+    // WARNING: fast blink (4 Hz)
+    if (level == THREAT_WARNING) {
+        if (now - lastToggle >= 125) {
+            ledOn = !ledOn;
+            digitalWrite(PIN_LED, ledOn ? HIGH : LOW);
+            lastToggle = now;
+        }
+        return;
+    }
+
+    // CRITICAL: solid ON
+    if (level == THREAT_CRITICAL) {
+        if (!ledOn) {
             digitalWrite(PIN_LED, HIGH);
-            break;
+            ledOn = true;
+        }
     }
 }
 

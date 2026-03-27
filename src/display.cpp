@@ -113,7 +113,7 @@ void displayBootSplash(Adafruit_SSD1306& disp) {
     disp.clearDisplay();
     disp.drawBitmap(0, 0, splash_logo, 128, 64, SSD1306_WHITE);
     disp.display();
-    delay(1500);
+    delay(1000);
 }
 
 // ── Spectrum helpers ────────────────────────────────────────
