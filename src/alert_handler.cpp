@@ -47,51 +47,10 @@ static const unsigned long REMINDER_INTERVAL  = 30000;   // 30 seconds
 // ── LED pattern (non-LEDC, uses digitalWrite) ───────────────
 
 static void updateLED(ThreatLevel level, bool acknowledged) {
-    static unsigned long lastToggle = 0;
-    static bool ledOn = false;
-    static unsigned long criticalSinceMs = 0;
-    static bool wasCritical = false;
-    unsigned long now = millis();
-
-    // Track how long CRITICAL has been sustained
-    if (level == THREAT_CRITICAL) {
-        if (!wasCritical) {
-            criticalSinceMs = now;
-            wasCritical = true;
-        }
-    } else {
-        wasCritical = false;
-    }
-
-    // LED only activates after CRITICAL sustained for 5+ seconds
-    // This filters brief ambient spikes from triggering the LED
-    bool criticalConfirmed = wasCritical && (now - criticalSinceMs >= 5000);
-
-    if (!criticalConfirmed && !acknowledged) {
-        // Not a confirmed threat: LED OFF
-        if (ledOn) {
-            digitalWrite(PIN_LED, LOW);
-            ledOn = false;
-        }
-        return;
-    }
-
-    if (acknowledged) {
-        // ACK'd: slow blink to confirm
-        if (now - lastToggle >= 1000) {
-            ledOn = !ledOn;
-            digitalWrite(PIN_LED, ledOn ? HIGH : LOW);
-            lastToggle = now;
-        }
-        return;
-    }
-
-    // Confirmed CRITICAL: fast blink
-    if (now - lastToggle >= 200) {
-        ledOn = !ledOn;
-        digitalWrite(PIN_LED, ledOn ? HIGH : LOW);
-        lastToggle = now;
-    }
+    // LED disabled until field-tested thresholds prevent ambient ISM
+    // traffic from escalating to WARNING/CRITICAL.
+    // TODO: re-enable with proper drone-only trigger after field testing
+    digitalWrite(PIN_LED, LOW);
 }
 
 // ── Select tone pattern based on source and severity ────────

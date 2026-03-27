@@ -369,15 +369,7 @@ void setup() {
     printBanner();
 
     pinMode(PIN_LED, OUTPUT);
-    // Quick LED test — blink once to verify pin polarity
-    digitalWrite(PIN_LED, HIGH);
-    delay(150);
-    digitalWrite(PIN_LED, LOW);
-    delay(150);
-    digitalWrite(PIN_LED, HIGH);
-    delay(150);
-    digitalWrite(PIN_LED, LOW);
-    Serial.println("[LED] Boot blink test done (should have blinked 2x)");
+    digitalWrite(PIN_LED, LOW);  // LED off — disabled until field-tested thresholds
     pinMode(PIN_BOOT, INPUT);  // External pull-up on GPIO 0 — no INPUT_PULLUP needed
 
     // Hardware init — splash stays on screen during entire init sequence
