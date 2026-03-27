@@ -17,7 +17,7 @@ static const UBaseType_t PRIO_DISPLAY   = 1;
 // Stack sizes in bytes — NAV-SAT packets are large and SparkFun's parser is stack-hungry
 static const uint32_t STACK_LORA_SCAN = 8192;
 static const uint32_t STACK_GPS_READ  = 8192;
-static const uint32_t STACK_ALERT     = 4096;
+static const uint32_t STACK_ALERT     = 6144;
 static const uint32_t STACK_DISPLAY   = 8192;
 
 #endif // TASK_CONFIG_H

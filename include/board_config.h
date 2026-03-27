@@ -43,6 +43,10 @@ static const int PIN_SD_MOSI = 15;
 static const int PIN_LED  = 37;
 static const int PIN_BOOT = 0;   // BOOT button, active LOW
 
+// Buzzer
+static const int PIN_BUZZER = 16;  // GPIO 16 — PWM-capable, on header
+static const bool HAS_BUZZER = true;
+
 // Board capabilities
 static const bool HAS_OLED_RST  = false;
 static const bool HAS_OLED_VEXT = false;
@@ -79,6 +83,10 @@ static const int PIN_GPS_TX = 45;
 // Status LED and button
 static const int PIN_LED  = 35;
 static const int PIN_BOOT = 0;   // BOOT button, active LOW
+
+// Buzzer
+static const int PIN_BUZZER = 47;  // GPIO 47 — PWM-capable
+static const bool HAS_BUZZER = true;
 
 // Board capabilities
 static const bool HAS_OLED_RST  = true;
@@ -128,6 +136,10 @@ static const int PIN_SD_MOSI = 15;
 static const int PIN_LED  = 37;
 static const int PIN_BOOT = 0;
 
+// Buzzer
+static const int PIN_BUZZER = 16;  // GPIO 16 — same as T3S3
+static const bool HAS_BUZZER = true;
+
 // Board capabilities
 static const bool HAS_OLED_RST  = false;
 static const bool HAS_OLED_VEXT = false;
@@ -147,5 +159,9 @@ static const bool WIFI_ENABLED  = true;
 static const uint32_t OLED_I2C_ADDR  = 0x3C;
 static const uint32_t GPS_BAUD_DEFAULT = 9600;
 static const uint32_t GPS_BAUD_TARGET  = 38400;
+
+// Buzzer configuration (common to all boards)
+static const int BUZZER_LEDC_CHANNEL    = 1;  // Channel 1 — LED uses digitalWrite, no conflict
+static const int BUZZER_LEDC_RESOLUTION = 8;  // 8-bit duty cycle
 
 #endif // BOARD_CONFIG_H

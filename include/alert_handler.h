@@ -3,8 +3,18 @@
 
 #include "detection_types.h"
 
-// FreeRTOS task — blocks on detectionQueue, prints events to serial.
-// Fleshed out in Sprint 6 with classification and response logic.
+// FreeRTOS task — processes detection events, drives LED + buzzer
 void alertTask(void* param);
+
+// Called from display task on double-press to acknowledge current alert
+void alertAcknowledge();
+
+// Called from display task to toggle mute (3-second hold)
+void alertToggleMute();
+
+// Query state for OLED display
+bool alertIsMuted();
+bool alertIsAcknowledged();
+unsigned long alertMuteRemainingMs();
 
 #endif // ALERT_HANDLER_H

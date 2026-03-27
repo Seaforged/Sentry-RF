@@ -30,6 +30,10 @@ struct SystemState {
     uint8_t         batteryPercent;
     unsigned long   lastSweepMs;
     unsigned long   lastGpsMs;
+    // Buzzer state (written by alert task, read by display task)
+    bool            buzzerMuted;
+    bool            buzzerAcknowledged;
+    unsigned long   muteRemainingMs;
 };
 
 // Detection event sources

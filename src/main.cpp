@@ -282,12 +282,26 @@ static void displayTask(void* param) {
         } else {
             if (buttonWasDown) {
                 unsigned long held = millis() - buttonDownMs;
-                if (held >= 100 && held < 1000) {
+
+                if (held >= 3000 && held < 5000) {
+                    // 3-5 second hold: toggle buzzer mute
+                    alertToggleMute();
+                } else if (held >= 100 && held < 1000) {
+                    // Short press — check for double-press
                     if (lastShortPressMs > 0 && millis() - lastShortPressMs < 500) {
-                        compassStartCalibration();
-                        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                            Serial.println("[UI] Double-press — calibration toggle");
-                            xSemaphoreGive(serialMutex);
+                        // Double-press: ACK alert if threat active, else compass cal
+                        if (alertIsAcknowledged() == false && local.threatLevel > THREAT_CLEAR) {
+                            alertAcknowledge();
+                            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                                Serial.println("[UI] Double-press — alert ACK");
+                                xSemaphoreGive(serialMutex);
+                            }
+                        } else {
+                            compassStartCalibration();
+                            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                                Serial.println("[UI] Double-press — calibration toggle");
+                                xSemaphoreGive(serialMutex);
+                            }
                         }
                         lastShortPressMs = 0;
                     } else {
