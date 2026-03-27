@@ -127,28 +127,32 @@ PlatformIO will automatically download all required dependencies:
 
 You should see:
 ```
+========== SENTRY-RF v1.2.1 ==========
 [BOOT] Boot #1
-========================
- SENTRY-RF v1.1.0
- Build: Mar 20 2026
- Board: LilyGo T3S3
- Mode:  FreeRTOS dual-core
-========================
 [OLED] OK
-[SCAN] FSK mode ready, 700 bins, 860.0–930.0 MHz
-[GPS] Connected at 38400 baud — configuring
+[SCAN] FSK mode ready, 350 bins, 860.0–930.0 MHz
+[GPS] FAIL: no response at 9600 or 38400    ← normal if no GPS connected
+[INIT] GPS init failed — continuing without GPS
+[WIFI] Promiscuous scanner active — channel hopping
 [COMPASS] Not detected — continuing without compass
 [INIT] FreeRTOS tasks launched — LoRa:Core1, GPS+WiFi:Core0
+[SCAN] Peak: 881.2 MHz @ -72.5 dBm (2407 ms) | Threat: CLEAR
 ```
+
+**Important build notes (v1.2.1):**
+- The scanner uses `beginFSK(915.0, ...)` for correct SX1262 image calibration and `startReceive()` per bin for real RSSI values — this is why you see 350 bins at 200kHz step (~2.4s sweep) instead of the original 700 bins
+- The T3S3 requires `board_build.flash_size = 4MB` in platformio.ini — without this, the ESP32-S3 boot-loops with a flash size mismatch error
+- GPS and compass modules are **optional** — the system runs fine without them, showing "NO GPS" on the GPS/Integrity screens
 
 ### First Boot Checklist
 
-- [ ] SENTRY-RF logo appears on OLED for ~2 seconds
-- [ ] Dashboard screen shows GPS fix acquiring, then "3D" with satellite count
-- [ ] RF SCAN screen shows spectrum (flat line in quiet environment)
-- [ ] Serial monitor shows sweep times (~460ms) and GPS data
-- [ ] Battery percentage shows on dashboard (97-100% on USB power)
-- [ ] Button press cycles through 6 screens
+- [ ] SENTRY-RF splash logo appears on OLED during boot (~8-10s with GPS timeout)
+- [ ] Dashboard screen shows threat level, mini spectrum bars, battery percentage
+- [ ] RF SCAN screen shows spectrum with real ambient peaks (not flat)
+- [ ] GPS screen shows "NO GPS" if no module connected (not garbage numbers)
+- [ ] Serial monitor shows sweep times (~2400ms) and threat level per sweep
+- [ ] Short button press cycles through 6 screens
+- [ ] LED stays off (disabled in v1.2.1 pending field testing)
 
 ---
 
@@ -171,31 +175,32 @@ Option 1 (GitHub transfer) is recommended — it redirects the old URL automatic
 
 ## Project Status
 
-**Current version: v1.1.0 — Early Development**
+**Current version: v1.2.1**
 
-This project is in active early development. It has been tested on a single T3S3 V1.3 unit in a controlled indoor environment. Field testing with real drones has not yet been performed.
+Validated against [JUH-MAK-IN JAMMER](https://github.com/seaforged-dev/Juh-Mak-In-Jammer) test suite — 8/8 modes passing (CW, ELRS FHSS, band sweep, Remote ID, mixed false positive, combined, drone swarm, baseline).
 
 ### What works today
-- Sub-GHz spectrum scanning (860-930 MHz) with drone frequency matching
-- GNSS integrity monitoring (spoofing detection, C/N0 analysis)
-- WiFi promiscuous mode scanning for Remote ID beacons
-- 6-screen OLED UI with custom boot splash
-- FreeRTOS dual-core parallel processing
-- Detection engine with 14 drone protocol signatures
-- Threat classification (CLEAR → ADVISORY → WARNING → CRITICAL)
+- Sub-GHz spectrum scanning (860-930 MHz) with per-bin RX mode and 200kHz resolution
+- Multi-peak 902-928 MHz ELRS band detection with dual threshold (Pfa < 8%)
+- WiFi Remote ID detection via ASTM F3411 vendor-specific IE parsing (any drone MAC)
+- GNSS integrity monitoring (spoofing detection, C/N0 analysis) — requires GPS module
+- Audible buzzer alert system with 7 tone patterns, ACK, mute (requires buzzer on GPIO 16)
+- 6-screen OLED UI with custom boot splash, display on Core 0 for clean rendering
+- FreeRTOS dual-core: LoRa scanning (Core 1), GPS + WiFi + Display (Core 0)
+- Detection engine with 14 drone protocol signatures and persistence tracking
+- Automated dual-device testing via Python scripts against JAMMER test suite
 
-### What needs testing/validation
+### What needs field testing
+- Detection thresholds vs real drones (current thresholds escalate on ambient ISM traffic)
+- LED alert behavior (disabled in v1.2.1 — needs thresholds that don't false-alarm)
 - LR1121 2.4 GHz dual-band scanning (hardware on order)
-- Detection against real drone targets (ELRS, DJI, Crossfire)
 - Compass heading and directional bearing
-- SD card logging
 - Long-duration stability (8+ hours on battery)
-- False positive rates in various RF environments
-- MON-HW jamming indicator (currently not populating — under investigation)
 
 ### Known limitations
-- Single antenna — no true direction finding (rotation-based bearing estimation only)
+- LED and buzzer alerts disabled pending field-calibrated detection thresholds
+- Ambient 868/915 MHz ISM traffic causes false escalation to WARNING/CRITICAL on bench
+- Single antenna — no true direction finding
 - SX1262 boards cannot scan 2.4 GHz (LR1121 board required)
-- Cannot detect 5.8 GHz signals (analog FPV video, DJI video downlink)
-- Cannot demodulate drone protocols — detection is based on RF energy + frequency matching
-- GPS_MIN_CNO set to 15 for outdoor use — may need adjustment for deep indoor testing
+- Cannot detect 5.8 GHz signals
+- GPS_MIN_CNO set to 15 for outdoor use — may need adjustment for indoor testing

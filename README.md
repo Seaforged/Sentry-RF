@@ -4,7 +4,7 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Platform: ESP32-S3](https://img.shields.io/badge/Platform-ESP32--S3-blue.svg)
-![Version: v1.2.0](https://img.shields.io/badge/Version-v1.2.0-orange.svg)
+![Version: v1.2.1](https://img.shields.io/badge/Version-v1.2.1-orange.svg)
 
 ## What It Does
 
@@ -63,7 +63,7 @@ If using a GPS module without a built-in compass, only TX/RX/VCC/GND are needed.
 
 ```bash
 # Clone
-git clone https://github.com/Ndwoo10/Sentry-RF.git
+git clone https://github.com/Seaforged/Sentry-RF.git
 cd Sentry-RF
 
 # Build for your board
@@ -126,6 +126,8 @@ Power cycle to return to WiFi scanner mode.
 - **SX1262 boards**: Limited to sub-GHz (860-930 MHz). Upgrade to LR1121 for 2.4 GHz coverage.
 - **C/N0 threshold tradeoff**: Production setting (15 dB-Hz) optimized for outdoor use. Lower to 6 for indoor bench testing.
 - **WiFi scanner vs dashboard**: Cannot run both simultaneously. Default is scanner mode; dashboard requires manual activation.
+- **LED disabled (v1.2.1)**: The status LED is currently disabled because ambient 868/915 MHz ISM traffic (LoRaWAN gateways, smart meters) causes the detection engine to escalate to WARNING/CRITICAL on bench, triggering false LED alerts. LED behavior will be re-enabled after field testing with real drones establishes thresholds that don't false-alarm on ambient noise.
+- **Buzzer alerts**: The buzzer system is implemented and functional (7 tone patterns, ACK gesture, mute) but shares the same ambient escalation issue as the LED. Best used with the JAMMER test suite in a controlled environment.
 
 ## Data Logging
 
