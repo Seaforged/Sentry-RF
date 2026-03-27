@@ -271,6 +271,7 @@ static void displayTask(void* param) {
     bool wasCalibrating = false;
 
     for (;;) {
+        // ── Phase 1: Button input ──────────────────────────────
         bool buttonDown = (digitalRead(PIN_BOOT) == LOW);
 
         if (buttonDown) {
@@ -283,13 +284,10 @@ static void displayTask(void* param) {
                 unsigned long held = millis() - buttonDownMs;
 
                 if (held >= 3000) {
-                    // 3+ second hold: toggle buzzer mute
                     alertToggleMute();
                 } else if (held >= 1000) {
-                    // 1-3 second hold: ACK current alert
                     alertAcknowledge();
                 } else if (held >= 100) {
-                    // Short press: advance screen
                     currentScreen = (currentScreen + 1) % NUM_SCREENS;
                     lastAdvanceMs = millis();
                 }
@@ -297,13 +295,17 @@ static void displayTask(void* param) {
             buttonWasDown = false;
         }
 
-        // Auto-rotate every 5 seconds if no button press
+        // Auto-rotate every 5 seconds
         if (millis() - lastAdvanceMs > 5000) {
             currentScreen = (currentScreen + 1) % NUM_SCREENS;
             lastAdvanceMs = millis();
         }
 
-        // Battery voltage on GPIO 1 (T3S3 voltage divider halves battery voltage)
+        // ── Phase 2: Snapshot screen index + state ─────────────
+        // Capture screen index into a local so it can't change during render
+        int renderScreen = currentScreen;
+
+        // Battery voltage
 #if defined(BOARD_T3S3) || defined(BOARD_T3S3_LR1121)
         {
             float voltage = analogReadMilliVolts(1) * 2.0 / 1000.0;
@@ -321,7 +323,7 @@ static void displayTask(void* param) {
             xSemaphoreGive(stateMutex);
         }
 
-        // Render — calibration overlay or normal screen
+        // ── Phase 3: Render (uses frozen renderScreen + local) ─
         if (compassIsCalibrating()) {
             if (!wasCalibrating) {
                 calDisplayStartMs = millis();
@@ -336,14 +338,15 @@ static void displayTask(void* param) {
             oled.setCursor(10, 24);
             oled.printf("Rotate 360%c (%lus)", 0xF8, elapsed);
             oled.setCursor(10, 44);
-            oled.println("Double-press to stop");
+            oled.println("Hold 1s to stop");
             oled.display();
         } else {
             wasCalibrating = false;
-            screens[currentScreen](oled, local, currentScreen);
+            screens[renderScreen](oled, local, renderScreen);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(200));
+        // ── Phase 4: Delay ─────────────────────────────────────
+        vTaskDelay(pdMS_TO_TICKS(100));  // 10 Hz refresh (was 200ms/5Hz)
     }
 }
 
