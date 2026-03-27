@@ -102,6 +102,7 @@ void displayInit(Adafruit_SSD1306& disp) {
         delay(100);
     }
     Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
+    Wire.setClock(400000);  // 400kHz fast mode — SSD1306 supports up to 400kHz
     if (!disp.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
         Serial.println("[OLED] FAIL: SSD1306 not found at 0x3C");
         return;
@@ -113,7 +114,8 @@ void displayBootSplash(Adafruit_SSD1306& disp) {
     disp.clearDisplay();
     disp.drawBitmap(0, 0, splash_logo, 128, 64, SSD1306_WHITE);
     disp.display();
-    delay(1000);
+    // Splash stays visible during hardware init — no delay needed here
+    // (the init sequence takes 8-10 seconds with GPS timeout)
 }
 
 // ── Spectrum helpers ────────────────────────────────────────

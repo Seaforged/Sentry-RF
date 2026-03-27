@@ -49,10 +49,23 @@ static const unsigned long REMINDER_INTERVAL  = 30000;   // 30 seconds
 static void updateLED(ThreatLevel level, bool acknowledged) {
     static unsigned long lastToggle = 0;
     static bool ledOn = false;
+    static ThreatLevel lastLoggedLevel = THREAT_CLEAR;
     unsigned long now = millis();
 
-    if (level <= THREAT_ADVISORY && !acknowledged) {
-        // CLEAR or ADVISORY with no threat: LED always OFF
+    // Log LED state changes
+    if (level != lastLoggedLevel) {
+        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            Serial.printf("[LED] Level=%d ack=%d → LED %s\n",
+                          level, acknowledged,
+                          (level <= THREAT_ADVISORY && !acknowledged) ? "OFF" : "active");
+            xSemaphoreGive(serialMutex);
+        }
+        lastLoggedLevel = level;
+    }
+
+    if (level < THREAT_CRITICAL && !acknowledged) {
+        // CLEAR, ADVISORY, WARNING without ACK: LED OFF
+        // LED only activates at CRITICAL (confirmed multi-source drone threat)
         if (ledOn) {
             digitalWrite(PIN_LED, LOW);
             ledOn = false;
@@ -61,7 +74,7 @@ static void updateLED(ThreatLevel level, bool acknowledged) {
     }
 
     if (acknowledged) {
-        // ACK'd: very slow blink (1 Hz) to confirm ACK received
+        // ACK'd: slow blink to confirm
         if (now - lastToggle >= 1000) {
             ledOn = !ledOn;
             digitalWrite(PIN_LED, ledOn ? HIGH : LOW);
@@ -70,21 +83,12 @@ static void updateLED(ThreatLevel level, bool acknowledged) {
         return;
     }
 
-    // WARNING: fast blink (4 Hz)
-    if (level == THREAT_WARNING) {
-        if (now - lastToggle >= 125) {
+    // CRITICAL: fast blink
+    if (level == THREAT_CRITICAL) {
+        if (now - lastToggle >= 200) {
             ledOn = !ledOn;
             digitalWrite(PIN_LED, ledOn ? HIGH : LOW);
             lastToggle = now;
-        }
-        return;
-    }
-
-    // CRITICAL: solid ON
-    if (level == THREAT_CRITICAL) {
-        if (!ledOn) {
-            digitalWrite(PIN_LED, HIGH);
-            ledOn = true;
         }
     }
 }
