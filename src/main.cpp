@@ -298,7 +298,13 @@ static void displayTask(void* param) {
         // Auto-rotate every 5 seconds
         if (millis() - lastAdvanceMs > 5000) {
             currentScreen = (currentScreen + 1) % NUM_SCREENS;
+            unsigned long sinceLast = millis() - lastAdvanceMs;
             lastAdvanceMs = millis();
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                Serial.printf("[DISPLAY] Screen %d, %lums since last\n",
+                              currentScreen, sinceLast);
+                xSemaphoreGive(serialMutex);
+            }
         }
 
         // ── Phase 2: Snapshot screen index + state ─────────────
@@ -370,7 +376,7 @@ static void printStackStats() {
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);
+    delay(500);
 
     // Boot counter — tracks resets for stability monitoring
     if (bootCount > 1000) bootCount = 0;

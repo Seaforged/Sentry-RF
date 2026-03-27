@@ -63,16 +63,12 @@ static void updateLED(ThreatLevel level, bool acknowledged) {
 
     switch (level) {
         case THREAT_CLEAR:
+        case THREAT_ADVISORY:
+            // LED off for CLEAR and ADVISORY (ambient ISM traffic)
             digitalWrite(PIN_LED, LOW);
             break;
-        case THREAT_ADVISORY:
-            if (now - lastToggle >= 500) {
-                ledState = !ledState;
-                digitalWrite(PIN_LED, ledState ? HIGH : LOW);
-                lastToggle = now;
-            }
-            break;
         case THREAT_WARNING:
+            // Fast blink at WARNING (confirmed drone signal)
             if (now - lastToggle >= 125) {
                 ledState = !ledState;
                 digitalWrite(PIN_LED, ledState ? HIGH : LOW);
@@ -80,6 +76,7 @@ static void updateLED(ThreatLevel level, bool acknowledged) {
             }
             break;
         case THREAT_CRITICAL:
+            // Solid on at CRITICAL
             digitalWrite(PIN_LED, HIGH);
             break;
     }
