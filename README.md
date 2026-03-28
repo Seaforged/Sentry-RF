@@ -139,7 +139,7 @@ Columns: `timestamp_ms, sweep_num, threat_level, peak_freq_mhz, peak_rssi_dbm, g
 
 ## Validated Test Results
 
-Tested against [JUH-MAK-IN JAMMER](https://github.com/seaforged-dev/Juh-Mak-In-Jammer) test suite — 8/8 modes passing:
+Tested against [JUH-MAK-IN JAMMER](https://github.com/Seaforged/Juh-Mak-In-Jammer) test suite — 8/8 modes passing:
 
 | Test | Mode | Result | Key Metric |
 |------|------|--------|------------|

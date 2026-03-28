@@ -177,7 +177,7 @@ Option 1 (GitHub transfer) is recommended — it redirects the old URL automatic
 
 **Current version: v1.2.1**
 
-Validated against [JUH-MAK-IN JAMMER](https://github.com/seaforged-dev/Juh-Mak-In-Jammer) test suite — 8/8 modes passing (CW, ELRS FHSS, band sweep, Remote ID, mixed false positive, combined, drone swarm, baseline).
+Validated against [JUH-MAK-IN JAMMER](https://github.com/Seaforged/Juh-Mak-In-Jammer) test suite — 8/8 modes passing (CW, ELRS FHSS, band sweep, Remote ID, mixed false positive, combined, drone swarm, baseline).
 
 ### What works today
 - Sub-GHz spectrum scanning (860-930 MHz) with per-bin RX mode and 200kHz resolution
