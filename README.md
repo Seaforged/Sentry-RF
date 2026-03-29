@@ -1,4 +1,4 @@
-![SENTRY-RF Splash Screen](SENTRY-RF_Logo.png)
+![SENTRY-RF Splash Screen](SENTRY-RF%20Logo.png)
 
 # SENTRY-RF
 
