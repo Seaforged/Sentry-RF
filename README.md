@@ -1,4 +1,4 @@
-![SENTRY-RF Logo](./Sentry-RF_Logo.png)
+![SENTRY-RF Logo](https://raw.githubusercontent.com/Seaforged/Sentry-RF/main/Sentry-RF_Logo.png)
 
 # SENTRY-RF
 
