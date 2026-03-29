@@ -1,3 +1,4 @@
+![SENTRY-RF Logo](./Sentry-RF_Logo.png)
 # SENTRY-RF
 
 **Open-source passive drone RF detector + GNSS jamming/spoofing monitor**
