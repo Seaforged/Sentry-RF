@@ -13,16 +13,18 @@
 #include "compass.h"
 #include "display.h"
 #include "detection_engine.h"
+#include "cad_scanner.h"
 #include "data_logger.h"
 #include "wifi_scanner.h"
 #include "alert_handler.h"
 
 // Hardware objects — each owned by exactly one task after setup()
 SPIClass loraSPI(HSPI);
+Module radioMod(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, loraSPI);
 #ifdef BOARD_T3S3_LR1121
-LR1121 radio = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, loraSPI);
+LR1121 radio(&radioMod);
 #else
-SX1262 radio = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, loraSPI);
+SX1262 radio(&radioMod);
 #endif
 Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, PIN_OLED_RST);
 
@@ -101,14 +103,65 @@ static void loRaScanTask(void* param) {
     IntegrityStatus snapIntegrity = {};
     uint32_t sweepNum = 0;
 
+    // ── Static CAD test at boot (10 seconds) ──────────────────────────────
+    // Radio is in FSK from scannerInit(). Switch to LoRa via low-level SPI,
+    // run CAD test, switch back to FSK.
+    static int cadTestDetections = 0;
+    static int cadTestTotal = 0;
+    {
+        // Switch to LoRa packet type
+        radio.standby();
+        uint8_t loraType = 0x01;  // RADIOLIB_SX126X_PACKET_TYPE_LORA
+        radioMod.SPIwriteStream(0x8A, &loraType, 1);
+        radio.setSpreadingFactor(6);
+        radio.setBandwidth(500.0);
+
+        float testFreqs[] = {902.0, 905.25, 908.5, 911.75, 915.0, 918.25, 921.5, 924.75};
+        unsigned long start = millis();
+        Serial.println("[CAD-TEST] Starting 10-second static CAD test (LoRa via SPI switch)...");
+
+        while (millis() - start < 10000) {
+            for (int i = 0; i < 8; i++) {
+                radio.setFrequency(testFreqs[i]);
+                int16_t result = radio.scanChannel();
+                cadTestTotal++;
+                if (result == RADIOLIB_LORA_DETECTED) {
+                    cadTestDetections++;
+                    Serial.printf("[CAD-TEST] DETECTED at %.2f MHz! (%d/%d)\n",
+                        testFreqs[i], cadTestDetections, cadTestTotal);
+                } else if (result != RADIOLIB_CHANNEL_FREE) {
+                    Serial.printf("[CAD-TEST] ERROR %d at %.2f MHz\n", result, testFreqs[i]);
+                }
+            }
+        }
+        Serial.printf("[CAD-TEST] COMPLETE: %d/%d (%.1f%%)\n",
+            cadTestDetections, cadTestTotal,
+            cadTestTotal > 0 ? 100.0f * cadTestDetections / cadTestTotal : 0.0f);
+
+        // Switch back to FSK for RSSI sweep
+        radio.standby();
+        uint8_t fskType = 0x00;  // RADIOLIB_SX126X_PACKET_TYPE_GFSK
+        radioMod.SPIwriteStream(0x8A, &fskType, 1);
+        radio.setBitRate(4.8);
+        radio.setFrequencyDeviation(5.0);
+        radio.setRxBandwidth(234.3);
+        radio.setFrequency(860.0);
+        radio.setRxBoostedGainMode(true);
+    }
+
+    // ── PART B: Normal scan loop (LoRa-native mode) ─────────────────────
     for (;;) {
+        // RSSI sweep — works in LoRa mode via setFrequency + startReceive + getRSSI
         scannerSweep(radio, localResult);
 
 #ifdef BOARD_T3S3_LR1121
-        // 2.4 GHz sweep — LR1121 handles band switch transparently
         ScanResult24 local24;
         scannerSweep24(radio, local24);
 #endif
+
+        // CAD scan — no mode switch needed, we're already in LoRa mode
+        CadFskResult cadFsk = cadFskScan(radio, sweepNum);
+        detectionEngineSetCadFsk(cadFsk.confirmedCadCount, cadFsk.confirmedFskCount);
 
         // Snapshot GPS/integrity + update scan in shared state under one lock
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -143,6 +196,9 @@ static void loRaScanTask(void* param) {
             Serial.printf("[SCAN] Peak: %.1f MHz @ %.1f dBm (%lu ms) | Threat: %s\n",
                           localResult.peakFreq, localResult.peakRSSI,
                           localResult.sweepTimeMs, threatLevelStr(threat));
+            Serial.printf("[CAD] cycle=%u confirmed=%d pending=%d | boot_test=%d/%d\n",
+                          sweepNum, cadFsk.confirmedCadCount, cadFsk.pendingTaps,
+                          cadTestDetections, cadTestTotal);
 
             // Print peaks above noise floor in the 902-928 MHz ELRS US band.
             // Uses median-based noise floor from the 902-928 sub-band itself
@@ -387,6 +443,8 @@ void setup() {
         Serial.printf("[INIT] Scanner init failed: %d\n", scanState);
         return;
     }
+
+    cadScannerInit();
 
     if (!gpsInit()) {
         Serial.println("[INIT] GPS init failed — continuing without GPS");

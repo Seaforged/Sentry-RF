@@ -46,8 +46,9 @@ static bool configureUBX() {
 
     setupLibraryState();
 
-    // Zero-velocity model — Kalman filter assumes no motion, reduces position wander
-    gps.setDynamicModel(DYN_MODEL_STATIONARY);
+    // Portable model — works on foot, in vehicles, and everywhere in between.
+    // Stationary model rejects all motion as noise, breaking GPS at highway speeds.
+    gps.setDynamicModel(DYN_MODEL_PORTABLE);
 
     // Indoor-safe C/N0 threshold — low enough to keep weak satellites in the solution
     gps.setVal8(UBLOX_CFG_NAVSPG_INFIL_MINCNO, GPS_MIN_CNO, VAL_LAYER_RAM_BBR);

@@ -72,16 +72,21 @@ void scannerSweep24(LR1121& radio, ScanResult24& result) {
 #else // SX1262 boards
 
 int scannerInit(SX1262& radio) {
-    // Init at 915 MHz (center of scan range) so the SX1262 calibrates
-    // image rejection for the correct band — not the 434 MHz default.
-    // 4.8 kbps, 5.0 kHz deviation, 234.3 kHz RX BW, 10 dBm, 16-byte preamble
+    // Explicitly reset the SX1262 via RESET pin for clean state after crash reboots
+    pinMode(PIN_LORA_RST, OUTPUT);
+    digitalWrite(PIN_LORA_RST, LOW);
+    delay(10);
+    digitalWrite(PIN_LORA_RST, HIGH);
+    delay(20);
+
+    // Init in FSK mode — proven to work, used for RSSI sweeps.
+    // CAD scans switch to LoRa packet type via low-level SPI command.
     int state = radio.beginFSK(915.0, 4.8, 5.0, 234.3, 10, 16);
     if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("[SCAN] FSK init failed: %d\n", state);
         return state;
     }
 
-    // Prime PLL near scan start before the first sweep
     state = radio.setFrequency(860.0);
     if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("[SCAN] Frequency prime failed: %d\n", state);
