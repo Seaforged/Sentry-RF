@@ -286,6 +286,21 @@ static int countPersistentProtocol(bool want24GHz) {
     return count;
 }
 
+// Count protocols seen exclusively in the 902-928 MHz US band (no EU overlap)
+static int countPersistentProtocolUS() {
+    int count = 0;
+    for (int i = 0; i < MAX_PROTO_TRACKED; i++) {
+        if (protoTracked[i].active &&
+            protoTracked[i].consecutiveCount >= PERSIST_THRESHOLD &&
+            protoTracked[i].protocol != nullptr &&
+            !protoTracked[i].protocol->is24GHz &&
+            protoTracked[i].minFreqSeen >= 902.0f) {
+            count++;
+        }
+    }
+    return count;
+}
+
 // ── 2.4 GHz peak extraction ────────────────────────────────────────────────
 
 static int extractPeaks24(const ScanResult24& scan, float noiseFloor, DetectedPeak* peaks) {
@@ -436,7 +451,8 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
                           || (strongPendingCadThisCycle > 0) || (totalActiveTapsThisCycle > 0);
 
     // RSSI persistence in the US band (no cell tower overlap)
-    bool rssiPersistentUS = (freqUS >= 1) || (protoSubGHz >= 1);
+    int protoUS = countPersistentProtocolUS();
+    bool rssiPersistentUS = (freqUS >= 1) || (protoUS >= 1);
 
     // HIGH: confirmed CAD alone (definitive), OR any CAD + persistent RSSI (corroborated)
     bool highConfidence = (cadDetectionsThisCycle > 0) || (fskDetectionsThisCycle > 0)
