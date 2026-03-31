@@ -4,7 +4,7 @@
 
 SENTRY-RF is an open-source, ESP32-S3-based passive drone RF detector and GNSS jamming/spoofing monitor. It performs sub-GHz spectrum scanning (860-930 MHz), optional 2.4 GHz scanning (LR1121 boards), WiFi-based Remote ID detection (ASTM F3411), and real-time GNSS integrity monitoring using u-blox M10 UBX protocol. It is a personal open-source project (MIT license) under the Seaforged GitHub organization -- not a commercial product.
 
-**Current version:** v1.3.0 (stable, CAD-as-discriminator detection engine, validated against JUH-MAK-IN JAMMER test suite, 8/8 modes passing)
+**Current version:** v1.4.0 (stable, CAD-first scan pipeline with ambient warmup filter, validated against JUH-MAK-IN JAMMER test suite, 8/8 modes passing)
 
 **Repository:** https://github.com/Seaforged/SENTRY-RF
 
