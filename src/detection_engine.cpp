@@ -36,11 +36,54 @@ struct ProtoTracker {
 
 static ProtoTracker protoTracked[MAX_PROTO_TRACKED];
 
-// ── CAD/FSK high-confidence detection counts (per sweep cycle) ─────────────
+// ── CAD/FSK detection counts (per sweep cycle) ───────────────────────────
 
 static int cadDetectionsThisCycle = 0;
 static int fskDetectionsThisCycle = 0;
 static int strongPendingCadThisCycle = 0;
+static int totalActiveTapsThisCycle = 0;
+
+// ── Band energy trending (902-928 MHz) ──────────────────────────────────
+// Tracks average RSSI across US band to detect aggregate FHSS energy rise.
+// FHSS drones spread energy across 80 channels — individual peaks come and
+// go, but the band average rises measurably.
+
+static const int BAND_ENERGY_HISTORY = 10;
+static const float BAND_ENERGY_THRESHOLD_DB = 3.0f;
+static float bandEnergyHistory[BAND_ENERGY_HISTORY];
+static int bandEnergyIdx = 0;
+static int bandEnergySamples = 0;
+static bool bandEnergyElevated = false;
+
+static void updateBandEnergy(const float* rssi) {
+    // Compute average RSSI across 902-928 MHz (bins 210-340)
+    static const int US_START_BIN = 210;
+    static const int US_END_BIN = 340;
+    float sum = 0;
+    for (int i = US_START_BIN; i < US_END_BIN; i++) {
+        sum += rssi[i];
+    }
+    float currentAvg = sum / (US_END_BIN - US_START_BIN);
+
+    // Compute rolling baseline from history
+    float baseline = currentAvg;  // fallback if no history yet
+    if (bandEnergySamples > 0) {
+        float histSum = 0;
+        int count = (bandEnergySamples < BAND_ENERGY_HISTORY) ? bandEnergySamples : BAND_ENERGY_HISTORY;
+        for (int i = 0; i < count; i++) {
+            histSum += bandEnergyHistory[i];
+        }
+        baseline = histSum / count;
+    }
+
+    // Store current value in circular buffer
+    bandEnergyHistory[bandEnergyIdx] = currentAvg;
+    bandEnergyIdx = (bandEnergyIdx + 1) % BAND_ENERGY_HISTORY;
+    if (bandEnergySamples < BAND_ENERGY_HISTORY) bandEnergySamples++;
+
+    // Flag elevated if current average exceeds rolling baseline by threshold
+    bandEnergyElevated = (bandEnergySamples >= 3) && (currentAvg > baseline + BAND_ENERGY_THRESHOLD_DB);
+}
 
 // ── Threat state machine ────────────────────────────────────────────────────
 
@@ -367,12 +410,15 @@ static void emitFskEvent(float freq, uint8_t severity) {
 }
 
 static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
-    // ── Confidence-based threat assessment ──────────────────────────────
-    // HIGH:   CAD-confirmed LoRa or FSK preamble detected
-    // MEDIUM: RSSI peak at 902–928 MHz (no cell tower overlap) with persistence
-    // LOW:    RSSI peak at 869–886 MHz without CAD confirmation
-
-    bool highConfidence = (cadDetectionsThisCycle > 0) || (fskDetectionsThisCycle > 0);
+    // ── CAD-as-discriminator threat assessment ─────────────────────────
+    //
+    // Philosophy: RSSI detects presence. CAD discriminates modulation.
+    // One CAD hit has near-zero false alarm rate against non-LoRa signals.
+    // So CAD + RSSI corroboration = definitive drone identification.
+    //
+    // HIGH:   CAD confirmed (3+ hits alone) OR any CAD activity + persistent RSSI
+    // MEDIUM: Persistent RSSI in US band, OR band energy elevated, OR strong CAD
+    // LOW:    RSSI in EU overlap band without CAD
 
     // RSSI persistence — per-frequency and per-protocol
     int freqSubGHz  = countPersistentDrone();
@@ -385,26 +431,35 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     bool gnssAnomaly = integrity.jammingDetected || integrity.spoofingDetected ||
                        integrity.cnoAnomalyDetected;
 
-    // Medium confidence: persistent RSSI in US band, OR 2-hit CAD taps (strong pending)
-    bool mediumConfidence = (freqUS >= 1) || (protoSubGHz >= 1 && freqUS >= 1)
+    // CAD activity: any LoRa detection at any confidence level
+    bool anyCadActivity = (cadDetectionsThisCycle > 0) || (fskDetectionsThisCycle > 0)
+                          || (strongPendingCadThisCycle > 0) || (totalActiveTapsThisCycle > 0);
+
+    // RSSI persistence in the US band (no cell tower overlap)
+    bool rssiPersistentUS = (freqUS >= 1) || (protoSubGHz >= 1);
+
+    // HIGH: confirmed CAD alone (definitive), OR any CAD + persistent RSSI (corroborated)
+    bool highConfidence = (cadDetectionsThisCycle > 0) || (fskDetectionsThisCycle > 0)
+                          || (anyCadActivity && rssiPersistentUS);
+
+    // MEDIUM: persistent RSSI in US band, band energy rise, or strong CAD pending
+    bool mediumConfidence = rssiPersistentUS || bandEnergyElevated
                             || (strongPendingCadThisCycle > 0);
 
     ThreatLevel desired = THREAT_CLEAR;
 
-    // HIGH: CAD/FSK modulation match → CRITICAL
+    // HIGH: CAD discriminated → CRITICAL
     if (highConfidence) {
         desired = THREAT_CRITICAL;
     }
     // MEDIUM: persistent RSSI in US band or 2.4 GHz → WARNING
     else if (mediumConfidence || persistent24GHz >= 1) {
         desired = THREAT_WARNING;
-        // Corroboration with GNSS → CRITICAL
         if (gnssAnomaly) desired = THREAT_CRITICAL;
     }
     // LOW: RSSI-only in EU overlap band → ADVISORY max
     else if (freqSubGHz >= 1 || protoSubGHz >= 1) {
         desired = THREAT_ADVISORY;
-        // Corroboration with GNSS → WARNING
         if (gnssAnomaly) desired = THREAT_WARNING;
     }
 
@@ -471,21 +526,31 @@ void detectionEngineInit() {
     memset(protoTracked, 0, sizeof(protoTracked));
     cadDetectionsThisCycle = 0;
     fskDetectionsThisCycle = 0;
+    strongPendingCadThisCycle = 0;
+    totalActiveTapsThisCycle = 0;
+    memset(bandEnergyHistory, 0, sizeof(bandEnergyHistory));
+    bandEnergyIdx = 0;
+    bandEnergySamples = 0;
+    bandEnergyElevated = false;
     currentThreat = THREAT_CLEAR;
     lastThreatEventMs = 0;
     ambientFilterInit();
 }
 
-void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad) {
+void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad, int activeTaps) {
     cadDetectionsThisCycle = cadCount;
     fskDetectionsThisCycle = fskCount;
     strongPendingCadThisCycle = strongPendingCad;
+    totalActiveTapsThisCycle = activeTaps;
 }
 
 ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
                                   const IntegrityStatus& integrity,
                                   const ScanResult24* scan24) {
     ambientFilterUpdate(scan);
+
+    // Band energy trending — detect aggregate FHSS energy in 902-928 MHz
+    updateBandEnergy(scan.rssi);
 
     // Sub-GHz RSSI pipeline
     float noiseFloor = computeNoiseFloor(scan.rssi, SCAN_BIN_COUNT);

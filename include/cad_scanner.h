@@ -28,6 +28,7 @@ struct CadFskResult {
     int confirmedFskCount;    // FSK taps with 3+ consecutive hits
     int strongPendingCad;     // CAD taps with exactly 2 consecutive hits
     int pendingTaps;          // active taps not yet confirmed
+    int totalActiveTaps;      // all active taps (any hit count)
 };
 
 // ── Channel scan parameters ─────────────────────────────────────────────────

@@ -117,12 +117,12 @@ static void tapMiss(CadTap* tap) {
     }
 }
 
-static void countConfirmed(int& cadCount, int& fskCount, int& strongPending, int& pending) {
-    cadCount = 0; fskCount = 0; strongPending = 0; pending = 0;
+static void countConfirmed(int& cadCount, int& fskCount, int& strongPending, int& pending, int& totalActive) {
+    cadCount = 0; fskCount = 0; strongPending = 0; pending = 0; totalActive = 0;
     for (int i = 0; i < MAX_TAPS; i++) {
         if (!tapList[i].active) continue;
+        totalActive++;
         if (tapList[i].consecutiveHits >= TAP_CONFIRM_HITS) {
-            // Skip confirmed taps that match ambient LoRa sources from warmup
             if (!tapList[i].isFsk && isAmbientCadSource(tapList[i].frequency, tapList[i].sf))
                 continue;
             if (tapList[i].isFsk) fskCount++;
@@ -178,14 +178,14 @@ static void switchToFSK(SX1262& radio) {
 #ifdef BOARD_T3S3_LR1121
 
 CadFskResult cadFskScan(LR1121& radio, uint32_t cycleNum) {
-    CadFskResult result = {0, 0, 0, 0};
+    CadFskResult result = {0, 0, 0, 0, 0};
     return result;
 }
 
 #else // SX1262 boards
 
 CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum) {
-    CadFskResult result = {0, 0, 0, 0};
+    CadFskResult result = {0, 0, 0, 0, 0};
 
     // Switch from FSK to LoRa packet type via low-level SPI command
     switchToLoRa(radio);
@@ -278,7 +278,7 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum) {
         }
     }
 
-    countConfirmed(result.confirmedCadCount, result.confirmedFskCount, result.strongPendingCad, result.pendingTaps);
+    countConfirmed(result.confirmedCadCount, result.confirmedFskCount, result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
 
     // Post-warmup ambient catch: if a newly confirmed tap was FIRST SEEN during
     // the warmup window, it's infrastructure that took time to accumulate 3 hits.
