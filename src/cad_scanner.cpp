@@ -27,42 +27,46 @@ static float elrs868Freq(int ch) { return 860.0f + (ch * 0.520f); }
 static float crsfFskFreq(int ch) { return 902.165f + (ch * 0.260f); }
 
 // ── Ambient CAD source tracking ─────────────────────────────────────────────
-// LoRa sources present during warmup (first 10 cycles) are infrastructure,
-// not drones. Record their frequency/SF and exclude from confirmed counts.
+// LoRa sources present during warmup are infrastructure, not drones.
+// Record their frequency/SF during the first N cycles and exclude from
+// confirmed counts. A drone arriving after boot will appear on frequencies
+// NOT seen during warmup.
 
-static const int MAX_AMBIENT_CAD = 16;
-static const int AMBIENT_CAD_WARMUP_CYCLES = 20;
+static const int MAX_AMBIENT_TAPS = 32;
+static const int AMBIENT_CAD_WARMUP_CYCLES = 20;  // ~50s at ~2.5s/cycle
+static const float AMBIENT_FREQ_TOLERANCE = 0.2f;  // ±200 kHz match window
 
-struct AmbientCadSource {
-    float   frequency;
-    uint8_t sf;
-    bool    active;
+struct AmbientTap {
+    float    frequency;
+    uint8_t  sf;
+    uint16_t firstSeenCycle;
+    bool     active;
 };
 
-static AmbientCadSource ambientCad[MAX_AMBIENT_CAD];
-static bool ambientCadLocked = false;
-static uint32_t cadCycleCount = 0;
+static AmbientTap ambientTaps[MAX_AMBIENT_TAPS];
+static uint8_t ambientTapCount = 0;
+static uint16_t warmupCycleCount = 0;
+static bool warmupComplete = false;
 
 static bool isAmbientCadSource(float freq, uint8_t sf) {
-    for (int i = 0; i < MAX_AMBIENT_CAD; i++) {
-        if (ambientCad[i].active &&
-            ambientCad[i].sf == sf &&
-            fabsf(ambientCad[i].frequency - freq) < TAP_FREQ_TOL) {
+    for (int i = 0; i < MAX_AMBIENT_TAPS; i++) {
+        if (ambientTaps[i].active &&
+            ambientTaps[i].sf == sf &&
+            fabsf(ambientTaps[i].frequency - freq) <= AMBIENT_FREQ_TOLERANCE) {
             return true;
         }
     }
     return false;
 }
 
-static void addAmbientCadSource(float freq, uint8_t sf) {
-    if (isAmbientCadSource(freq, sf)) return;  // already recorded
-    for (int i = 0; i < MAX_AMBIENT_CAD; i++) {
-        if (!ambientCad[i].active) {
-            ambientCad[i].frequency = freq;
-            ambientCad[i].sf = sf;
-            ambientCad[i].active = true;
-            return;
-        }
+static void recordAmbientTap(float freq, uint8_t sf) {
+    if (isAmbientCadSource(freq, sf)) return;
+    if (ambientTapCount < MAX_AMBIENT_TAPS) {
+        ambientTaps[ambientTapCount].frequency = freq;
+        ambientTaps[ambientTapCount].sf = sf;
+        ambientTaps[ambientTapCount].firstSeenCycle = warmupCycleCount;
+        ambientTaps[ambientTapCount].active = true;
+        ambientTapCount++;
     }
 }
 
@@ -70,9 +74,10 @@ static void addAmbientCadSource(float freq, uint8_t sf) {
 
 void cadScannerInit() {
     memset(tapList, 0, sizeof(tapList));
-    memset(ambientCad, 0, sizeof(ambientCad));
-    ambientCadLocked = false;
-    cadCycleCount = 0;
+    memset(ambientTaps, 0, sizeof(ambientTaps));
+    ambientTapCount = 0;
+    warmupCycleCount = 0;
+    warmupComplete = false;
     rotSF6 = rotSF7 = rotSF8 = rotSF9 = rotSF10 = rotSF11 = rotSF12 = 0;
 }
 
@@ -93,6 +98,7 @@ static CadTap* addTap(float freq, uint8_t sf) {
             tapList[i].frequency = freq;
             tapList[i].sf = sf;
             tapList[i].isFsk = false;
+            tapList[i].isAmbient = false;
             tapList[i].consecutiveHits = 1;
             tapList[i].missCount = 0;
             tapList[i].firstSeenMs = millis();
@@ -121,10 +127,10 @@ static void countConfirmed(int& cadCount, int& fskCount, int& strongPending, int
     cadCount = 0; fskCount = 0; strongPending = 0; pending = 0; totalActive = 0;
     for (int i = 0; i < MAX_TAPS; i++) {
         if (!tapList[i].active) continue;
+        // Skip ambient taps from all counts that feed threat escalation
+        if (tapList[i].isAmbient) continue;
         totalActive++;
         if (tapList[i].consecutiveHits >= TAP_CONFIRM_HITS) {
-            if (!tapList[i].isFsk && isAmbientCadSource(tapList[i].frequency, tapList[i].sf))
-                continue;
             if (tapList[i].isFsk) fskCount++;
             else cadCount++;
         } else if (tapList[i].consecutiveHits == 2 && !tapList[i].isFsk) {
@@ -263,28 +269,38 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum) {
     radio.setRxBoostedGainMode(true);
 
     // ── Warmup: record confirmed taps as ambient LoRa sources ───────────
-    cadCycleCount++;
-    if (!ambientCadLocked) {
-        if (cadCycleCount >= AMBIENT_CAD_WARMUP_CYCLES) {
-            ambientCadLocked = true;
-        }
-        // During warmup, any confirmed tap is assumed to be infrastructure
-        for (int i = 0; i < MAX_TAPS; i++) {
-            if (tapList[i].active &&
-                !tapList[i].isFsk &&
-                tapList[i].consecutiveHits >= TAP_CONFIRM_HITS) {
-                addAmbientCadSource(tapList[i].frequency, tapList[i].sf);
+    warmupCycleCount++;
+
+    if (!warmupComplete) {
+        if (warmupCycleCount >= AMBIENT_CAD_WARMUP_CYCLES) {
+            warmupComplete = true;
+            Serial.printf("[WARMUP] Complete after %u cycles. %u ambient taps recorded:\n",
+                          warmupCycleCount, ambientTapCount);
+            for (uint8_t i = 0; i < ambientTapCount; i++) {
+                if (ambientTaps[i].active) {
+                    Serial.printf("  - %.1f MHz / SF%u (first seen cycle %u)\n",
+                                  ambientTaps[i].frequency, ambientTaps[i].sf,
+                                  ambientTaps[i].firstSeenCycle);
+                }
+            }
+        } else {
+            // Still in warmup — record any tap with 2+ hits as infrastructure.
+            // This catches ambient sources that build slowly (LoRaWAN gateways,
+            // Meshtastic relays) before they reach the 3-hit confirmation threshold.
+            for (int i = 0; i < MAX_TAPS; i++) {
+                if (tapList[i].active &&
+                    !tapList[i].isFsk &&
+                    tapList[i].consecutiveHits >= 2) {
+                    recordAmbientTap(tapList[i].frequency, tapList[i].sf);
+                }
             }
         }
     }
 
-    countConfirmed(result.confirmedCadCount, result.confirmedFskCount, result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
-
-    // Post-warmup ambient catch: if a newly confirmed tap was FIRST SEEN during
-    // the warmup window, it's infrastructure that took time to accumulate 3 hits.
-    // Add it to the ambient set so it stops counting as a detection.
-    // A drone arriving after warmup will have firstSeenMs after the warmup window.
-    if (ambientCadLocked) {
+    // Post-warmup ambient catch: taps first seen during the warmup window that
+    // took extra cycles to accumulate 3 hits are still infrastructure. A drone
+    // arriving after warmup will have firstSeenMs after the warmup end time.
+    if (warmupComplete) {
         unsigned long warmupEndMs = AMBIENT_CAD_WARMUP_CYCLES * 2500UL;
         for (int i = 0; i < MAX_TAPS; i++) {
             if (tapList[i].active &&
@@ -292,10 +308,21 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum) {
                 tapList[i].consecutiveHits >= TAP_CONFIRM_HITS &&
                 tapList[i].firstSeenMs < warmupEndMs &&
                 !isAmbientCadSource(tapList[i].frequency, tapList[i].sf)) {
-                addAmbientCadSource(tapList[i].frequency, tapList[i].sf);
+                recordAmbientTap(tapList[i].frequency, tapList[i].sf);
             }
         }
     }
+
+    // Tag each active tap with its ambient status
+    if (warmupComplete) {
+        for (int i = 0; i < MAX_TAPS; i++) {
+            if (tapList[i].active) {
+                tapList[i].isAmbient = isAmbientCadSource(tapList[i].frequency, tapList[i].sf);
+            }
+        }
+    }
+
+    countConfirmed(result.confirmedCadCount, result.confirmedFskCount, result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
 
     return result;
 }

@@ -21,6 +21,7 @@ struct CadTap {
     unsigned long lastSeenMs;
     bool     active;
     bool     isFsk;           // true for FSK taps, false for LoRa CAD taps
+    bool     isAmbient;       // true if matches ambient source from warmup
 };
 
 struct CadFskResult {
