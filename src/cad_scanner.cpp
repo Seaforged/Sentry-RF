@@ -1,18 +1,10 @@
 #include "cad_scanner.h"
+#include "board_config.h"
 #include <Arduino.h>
 #include <string.h>
 
 // Access the Module object for low-level SPI commands (defined in main.cpp)
 extern Module radioMod;
-
-// SX126x SetPacketType command (opcode 0x8A)
-#ifndef RADIOLIB_SX126X_CMD_SET_PACKET_TYPE
-#define RADIOLIB_SX126X_CMD_SET_PACKET_TYPE  0x8A
-#endif
-#ifndef RADIOLIB_SX126X_PACKET_TYPE_GFSK
-#define RADIOLIB_SX126X_PACKET_TYPE_GFSK     0x00
-#define RADIOLIB_SX126X_PACKET_TYPE_LORA     0x01
-#endif
 
 // ── Tap list (persists across scan cycles) ──────────────────────────────────
 
@@ -125,8 +117,8 @@ static void tapMiss(CadTap* tap) {
     }
 }
 
-static void countConfirmed(int& cadCount, int& fskCount, int& pending) {
-    cadCount = 0; fskCount = 0; pending = 0;
+static void countConfirmed(int& cadCount, int& fskCount, int& strongPending, int& pending) {
+    cadCount = 0; fskCount = 0; strongPending = 0; pending = 0;
     for (int i = 0; i < MAX_TAPS; i++) {
         if (!tapList[i].active) continue;
         if (tapList[i].consecutiveHits >= TAP_CONFIRM_HITS) {
@@ -135,33 +127,44 @@ static void countConfirmed(int& cadCount, int& fskCount, int& pending) {
                 continue;
             if (tapList[i].isFsk) fskCount++;
             else cadCount++;
+        } else if (tapList[i].consecutiveHits == 2 && !tapList[i].isFsk) {
+            strongPending++;
         } else {
             pending++;
         }
     }
 }
 
-// ── Low-level FSK ↔ LoRa packet type switch ─────────────────────────────────
-// The SX1262 supports switching between FSK and LoRa via a single SPI command
-// (SetPacketType, opcode 0x8A). This avoids the full begin() reinit that resets
-// the chip and fails with -707 on subsequent calls.
+// ── LoRa ↔ FSK mode switching ────────────────────────────────────────────────
+// Must use full begin()/beginFSK() to properly initialize RadioLib's internal
+// modem state. Raw SPI packet type switches leave LoRa params (codingRate,
+// ldrOptimize) undefined, causing broken CAD detection.
 
 #ifndef BOARD_T3S3_LR1121
 
 static void switchToLoRa(SX1262& radio) {
+    // Switch SX1262 from FSK to LoRa packet type via raw SPI command.
+    // CRITICAL: Must set ALL LoRa modem params (CR, sync word, preamble) after
+    // switching — RadioLib's internal state for these fields is zeroed after
+    // beginFSK(), and setSpreadingFactor/setBandwidth pass those zeroed values
+    // to setModulationParams(), resulting in invalid CAD configuration.
     radio.standby();
-    uint8_t loraType = RADIOLIB_SX126X_PACKET_TYPE_LORA;
-    radioMod.SPIwriteStream(RADIOLIB_SX126X_CMD_SET_PACKET_TYPE, &loraType, 1);
-    // Configure LoRa modulation: SF6, BW500, CR4/5, LDRO off
-    radio.setSpreadingFactor(6);
-    radio.setBandwidth(500.0);
+    uint8_t loraType = 0x01;  // RADIOLIB_SX126X_PACKET_TYPE_LORA
+    radioMod.SPIwriteStream(0x8A, &loraType, 1);
+
+    // Set CR FIRST — this initializes codingRate internal state before SF/BW
+    // call setModulationParams() with it
+    radio.setCodingRate(5);          // CR 4/5 — sets this->codingRate = 1
+    radio.setSpreadingFactor(6);     // SF6 — now setModulationParams uses correct CR
+    radio.setBandwidth(500.0);       // BW500
+    radio.setSyncWord(RADIOLIB_SX126X_SYNC_WORD_PRIVATE);  // 0x12
+    radio.setPreambleLength(8);
 }
 
 static void switchToFSK(SX1262& radio) {
     radio.standby();
-    uint8_t fskType = RADIOLIB_SX126X_PACKET_TYPE_GFSK;
-    radioMod.SPIwriteStream(RADIOLIB_SX126X_CMD_SET_PACKET_TYPE, &fskType, 1);
-    // Restore FSK modulation params for RSSI sweep
+    uint8_t fskType = 0x00;  // RADIOLIB_SX126X_PACKET_TYPE_GFSK
+    radioMod.SPIwriteStream(0x8A, &fskType, 1);
     radio.setBitRate(4.8);
     radio.setFrequencyDeviation(5.0);
     radio.setRxBandwidth(234.3);
@@ -175,19 +178,19 @@ static void switchToFSK(SX1262& radio) {
 #ifdef BOARD_T3S3_LR1121
 
 CadFskResult cadFskScan(LR1121& radio, uint32_t cycleNum) {
-    CadFskResult result = {0, 0, 0};
+    CadFskResult result = {0, 0, 0, 0};
     return result;
 }
 
 #else // SX1262 boards
 
 CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum) {
-    CadFskResult result = {0, 0, 0};
+    CadFskResult result = {0, 0, 0, 0};
 
     // Switch from FSK to LoRa packet type via low-level SPI command
     switchToLoRa(radio);
 
-    // ── PHASE 1: Priority re-check active taps ─────────────────────────
+    // ── PHASE 1: Priority re-check active taps + adjacent channels ─────
     for (int i = 0; i < MAX_TAPS; i++) {
         if (!tapList[i].active) continue;
         radio.setSpreadingFactor(tapList[i].sf);
@@ -195,7 +198,22 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum) {
         if (radio.scanChannel() == RADIOLIB_LORA_DETECTED) {
             tapHit(&tapList[i]);
         } else {
-            tapMiss(&tapList[i]);
+            // Adjacent channel re-check: ELRS hops pseudo-randomly, so the
+            // drone likely moved to a nearby channel. Check ±1 channel.
+            bool adjHit = false;
+            float spacing = 0.325f;  // ELRS 915 US channel spacing
+            for (float delta : {-spacing, spacing}) {
+                float adjFreq = tapList[i].frequency + delta;
+                if (adjFreq >= 902.0f && adjFreq <= 928.0f) {
+                    radio.setFrequency(adjFreq);
+                    if (radio.scanChannel() == RADIOLIB_LORA_DETECTED) {
+                        tapHit(&tapList[i]);
+                        adjHit = true;
+                        break;
+                    }
+                }
+            }
+            if (!adjHit) tapMiss(&tapList[i]);
         }
     }
 
@@ -217,11 +235,17 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum) {
     for (int s = 0; s < 7; s++) {
         SFScan& sc = sfScans[s];
         radio.setSpreadingFactor(sc.sf);
-        int start = ((*sc.rot) * sc.chCount) % sc.totalCh;
+
+        // Stride-based channel spread: instead of scanning sequential blocks,
+        // spread across the full band. E.g., SF6 scans 40 of 80 channels
+        // with stride=2: ch 0,2,4,6... on cycle 0; ch 1,3,5,7... on cycle 1.
+        int stride = sc.totalCh / sc.chCount;
+        if (stride < 1) stride = 1;
+        int offset = (*sc.rot) % stride;
         (*sc.rot)++;
 
         for (int i = 0; i < sc.chCount; i++) {
-            int ch = (start + i) % sc.totalCh;
+            int ch = (offset + i * stride) % sc.totalCh;
             float freq = sc.fn(ch);
             radio.setFrequency(freq);
 
@@ -254,7 +278,7 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum) {
         }
     }
 
-    countConfirmed(result.confirmedCadCount, result.confirmedFskCount, result.pendingTaps);
+    countConfirmed(result.confirmedCadCount, result.confirmedFskCount, result.strongPendingCad, result.pendingTaps);
 
     // Post-warmup ambient catch: if a newly confirmed tap was FIRST SEEN during
     // the warmup window, it's infrastructure that took time to accumulate 3 hits.

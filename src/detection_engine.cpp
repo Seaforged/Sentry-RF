@@ -40,6 +40,7 @@ static ProtoTracker protoTracked[MAX_PROTO_TRACKED];
 
 static int cadDetectionsThisCycle = 0;
 static int fskDetectionsThisCycle = 0;
+static int strongPendingCadThisCycle = 0;
 
 // ── Threat state machine ────────────────────────────────────────────────────
 
@@ -384,9 +385,9 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     bool gnssAnomaly = integrity.jammingDetected || integrity.spoofingDetected ||
                        integrity.cnoAnomalyDetected;
 
-    // Medium confidence: persistent RSSI detection in the 902-928 MHz US band
-    // (no cell tower overlap, so RSSI-only is meaningful)
-    bool mediumConfidence = (freqUS >= 1) || (protoSubGHz >= 1 && freqUS >= 1);
+    // Medium confidence: persistent RSSI in US band, OR 2-hit CAD taps (strong pending)
+    bool mediumConfidence = (freqUS >= 1) || (protoSubGHz >= 1 && freqUS >= 1)
+                            || (strongPendingCadThisCycle > 0);
 
     ThreatLevel desired = THREAT_CLEAR;
 
@@ -475,9 +476,10 @@ void detectionEngineInit() {
     ambientFilterInit();
 }
 
-void detectionEngineSetCadFsk(int cadCount, int fskCount) {
+void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad) {
     cadDetectionsThisCycle = cadCount;
     fskDetectionsThisCycle = fskCount;
+    strongPendingCadThisCycle = strongPendingCad;
 }
 
 ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,

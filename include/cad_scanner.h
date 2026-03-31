@@ -26,19 +26,22 @@ struct CadTap {
 struct CadFskResult {
     int confirmedCadCount;    // CAD taps with 3+ consecutive hits
     int confirmedFskCount;    // FSK taps with 3+ consecutive hits
+    int strongPendingCad;     // CAD taps with exactly 2 consecutive hits
     int pendingTaps;          // active taps not yet confirmed
 };
 
 // ── Channel scan parameters ─────────────────────────────────────────────────
 
 // Channels scanned per cycle at each SF (rotating across full channel plan)
-static const int CAD_CH_SF6  = 20;
+// SF6 dominates: ELRS 200Hz and Crossfire 50Hz are the most common drone modes.
+// Total: 66 channels, ~33ms per cycle.
+static const int CAD_CH_SF6  = 40;
 static const int CAD_CH_SF7  = 15;
-static const int CAD_CH_SF8  = 10;
-static const int CAD_CH_SF9  = 8;
-static const int CAD_CH_SF10 = 4;
-static const int CAD_CH_SF11 = 2;
-static const int CAD_CH_SF12 = 2;
+static const int CAD_CH_SF8  = 5;
+static const int CAD_CH_SF9  = 3;
+static const int CAD_CH_SF10 = 1;
+static const int CAD_CH_SF11 = 1;
+static const int CAD_CH_SF12 = 1;
 static const int FSK_CH      = 4;
 
 // Total ELRS channel counts

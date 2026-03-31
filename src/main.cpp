@@ -104,21 +104,34 @@ static void loRaScanTask(void* param) {
     uint32_t sweepNum = 0;
 
     // ── Static CAD test at boot (10 seconds) ──────────────────────────────
-    // Radio is in FSK from scannerInit(). Switch to LoRa via low-level SPI,
-    // run CAD test, switch back to FSK.
+    // Must use full radio.begin() for LoRa mode — raw SPI packet type switch
+    // leaves RadioLib's internal state inconsistent (codingRate, ldrOptimize
+    // undefined), causing broken CAD detection.
     static int cadTestDetections = 0;
     static int cadTestTotal = 0;
     {
-        // Switch to LoRa packet type
+#ifdef BOARD_T3S3_LR1121
+        // LR1121 can do full begin() without SPI timeout issues
+        int16_t loraState = radio.begin(902.0, 500.0, 6, 5, 0x12, 2, 8, 1.8);
+#else
+        // SX1262: raw SPI packet type switch + full param init
+        // (radio.begin() after beginFSK() causes -707 SPI timeout in RadioLib v7)
         radio.standby();
-        uint8_t loraType = 0x01;  // RADIOLIB_SX126X_PACKET_TYPE_LORA
+        uint8_t loraType = 0x01;
         radioMod.SPIwriteStream(0x8A, &loraType, 1);
+        radio.setCodingRate(5);
         radio.setSpreadingFactor(6);
         radio.setBandwidth(500.0);
+        radio.setSyncWord(RADIOLIB_SX126X_SYNC_WORD_PRIVATE);
+        radio.setPreambleLength(8);
+        int16_t loraState = RADIOLIB_ERR_NONE;
+#endif
+        Serial.printf("[CAD-TEST] LoRa init: %s (state=%d)\n",
+            loraState == RADIOLIB_ERR_NONE ? "OK" : "FAIL", loraState);
 
         float testFreqs[] = {902.0, 905.25, 908.5, 911.75, 915.0, 918.25, 921.5, 924.75};
         unsigned long start = millis();
-        Serial.println("[CAD-TEST] Starting 10-second static CAD test (LoRa via SPI switch)...");
+        Serial.println("[CAD-TEST] Starting 10-second static CAD test...");
 
         while (millis() - start < 10000) {
             for (int i = 0; i < 8; i++) {
@@ -139,13 +152,21 @@ static void loRaScanTask(void* param) {
             cadTestTotal > 0 ? 100.0f * cadTestDetections / cadTestTotal : 0.0f);
 
         // Switch back to FSK for RSSI sweep
+#ifdef BOARD_T3S3_LR1121
+        int16_t fskState = radio.beginGFSK(4.8, 5.0, 234.3, 16, 1.8);
+#else
         radio.standby();
-        uint8_t fskType = 0x00;  // RADIOLIB_SX126X_PACKET_TYPE_GFSK
+        uint8_t fskType = 0x00;
         radioMod.SPIwriteStream(0x8A, &fskType, 1);
         radio.setBitRate(4.8);
         radio.setFrequencyDeviation(5.0);
         radio.setRxBandwidth(234.3);
         radio.setFrequency(860.0);
+        int16_t fskState = RADIOLIB_ERR_NONE;
+#endif
+        if (fskState != RADIOLIB_ERR_NONE) {
+            Serial.printf("[CAD-TEST] FSK restore failed: %d\n", fskState);
+        }
         radio.setRxBoostedGainMode(true);
     }
 
@@ -161,7 +182,7 @@ static void loRaScanTask(void* param) {
 
         // CAD scan — no mode switch needed, we're already in LoRa mode
         CadFskResult cadFsk = cadFskScan(radio, sweepNum);
-        detectionEngineSetCadFsk(cadFsk.confirmedCadCount, cadFsk.confirmedFskCount);
+        detectionEngineSetCadFsk(cadFsk.confirmedCadCount, cadFsk.confirmedFskCount, cadFsk.strongPendingCad);
 
         // Snapshot GPS/integrity + update scan in shared state under one lock
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -196,9 +217,9 @@ static void loRaScanTask(void* param) {
             Serial.printf("[SCAN] Peak: %.1f MHz @ %.1f dBm (%lu ms) | Threat: %s\n",
                           localResult.peakFreq, localResult.peakRSSI,
                           localResult.sweepTimeMs, threatLevelStr(threat));
-            Serial.printf("[CAD] cycle=%u confirmed=%d pending=%d | boot_test=%d/%d\n",
-                          sweepNum, cadFsk.confirmedCadCount, cadFsk.pendingTaps,
-                          cadTestDetections, cadTestTotal);
+            Serial.printf("[CAD] cycle=%u confirmed=%d strong=%d pending=%d | boot_test=%d/%d\n",
+                          sweepNum, cadFsk.confirmedCadCount, cadFsk.strongPendingCad,
+                          cadFsk.pendingTaps, cadTestDetections, cadTestTotal);
 
             // Print peaks above noise floor in the 902-928 MHz ELRS US band.
             // Uses median-based noise floor from the 902-928 sub-band itself
