@@ -1,16 +1,14 @@
 #include "gnss_integrity.h"
+#include "sentry_config.h"
 #include <Arduino.h>
 #include <math.h>
 
-// Circular buffer for C/N0 standard deviation history — used for trend analysis
 static float cnoHistory[CNO_HISTORY_SIZE];
 static int cnoHistoryHead = 0;
 static bool cnoHistoryFull = false;
 
-// Thresholds tuned for spoofing/jamming detection
-static const float CNO_STDDEV_SPOOF_THRESH = 2.0;  // dB-Hz — uniform signals indicate single source
-static const uint8_t JAM_IND_THRESH = 50;           // 0-255 scale, >50 = likely interference
-static const int MIN_ELEV_FOR_CNO = 20;             // degrees — low sats are noisy, exclude them
+// CNO_STDDEV_SPOOF_THRESH, MIN_ELEV_FOR_CNO from sentry_config.h
+static const uint8_t JAM_IND_THRESH = 50;  // 0-255 scale, >50 = likely interference
 
 void integrityInit() {
     for (int i = 0; i < CNO_HISTORY_SIZE; i++) {

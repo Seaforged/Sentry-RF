@@ -1,6 +1,7 @@
 #include "alert_handler.h"
 #include "buzzer_manager.h"
 #include "board_config.h"
+#include "sentry_config.h"
 #include <Arduino.h>
 
 // ============================================================
@@ -41,8 +42,7 @@ static bool          _isAcknowledged   = false;
 static bool          _isMuted          = false;
 static unsigned long _muteStartMs      = 0;
 static unsigned long _lastEscalationMs = 0;
-static const unsigned long MUTE_DURATION_MS   = 300000;  // 5 minutes
-static const unsigned long REMINDER_INTERVAL  = 30000;   // 30 seconds
+// MUTE_DURATION_MS, REMINDER_INTERVAL from sentry_config.h
 
 // ── LED pattern (non-LEDC, uses digitalWrite) ───────────────
 

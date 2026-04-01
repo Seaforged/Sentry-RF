@@ -72,9 +72,7 @@ static float crsfFskFreq(int ch) { return 902.165f + (ch * 0.260f); }
 // confirmed counts. A drone arriving after boot will appear on frequencies
 // NOT seen during warmup.
 
-static const int MAX_AMBIENT_TAPS = 32;
-static const unsigned long AMBIENT_WARMUP_MS = 50000;  // 50 seconds real time
-static const float AMBIENT_FREQ_TOLERANCE = 0.2f;  // ±200 kHz match window
+// Constants from sentry_config.h: MAX_AMBIENT_TAPS, AMBIENT_WARMUP_MS, AMBIENT_FREQ_TOLERANCE
 
 struct AmbientTap {
     float    frequency;
@@ -115,8 +113,7 @@ static void recordAmbientTap(float freq, uint8_t sf) {
 // Aggregates hits across ALL frequencies/SFs — catches FHSS pattern where
 // no single frequency accumulates consecutive hits.
 
-static const int RECENT_HIT_BUF_SIZE = 64;
-static const unsigned long RECENT_HIT_WINDOW_MS = 30000;
+// Constants from sentry_config.h: RECENT_HIT_BUF_SIZE, RECENT_HIT_WINDOW_MS
 static unsigned long recentHitTimestamps[RECENT_HIT_BUF_SIZE];
 static int recentHitWriteIdx = 0;
 
@@ -315,12 +312,12 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
             if (below <= total / 2 && (below + equal) > total / 2) { nf = c; break; }
         }
 
-        float thresh = nf + 8.0f;
+        float thresh = nf + RSSI_GUIDED_THRESH_DB;
         int guidedScans = 0;
         radio.setSpreadingFactor(6);
         ChannelScanConfig_t cfg6 = buildCadConfig(6);
 
-        for (int bin = startBin; bin <= endBin && guidedScans < 8; bin++) {
+        for (int bin = startBin; bin <= endBin && guidedScans < RSSI_GUIDED_MAX_BINS; bin++) {
             if (rssi->rssi[bin] > thresh) {
                 float freq = SCAN_FREQ_START + (bin * SCAN_FREQ_STEP);
                 radio.setFrequency(freq);
@@ -393,8 +390,17 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     warmupCycleCount++;
 
     if (!warmupComplete) {
-        if (millis() >= AMBIENT_WARMUP_MS) {
+        bool normalEnd = (millis() >= AMBIENT_WARMUP_MS);
+        // Early exit: after minimum warmup, if environment is clean (no active taps),
+        // complete early to reduce blind time on power-on in clean field environments.
+        bool earlyExit = (millis() >= AMBIENT_EARLY_EXIT_MS) && (result.totalActiveTaps == 0)
+                         && (ambientTapCount == 0);
+        if (normalEnd || earlyExit) {
             warmupComplete = true;
+            if (earlyExit && !normalEnd) {
+                Serial.printf("[WARMUP] Early completion at %lus — clean environment. ",
+                              millis() / 1000);
+            }
             Serial.printf("[WARMUP] Complete after %u cycles (%lus). %u ambient taps recorded:\n",
                           warmupCycleCount, millis() / 1000, ambientTapCount);
             for (uint8_t i = 0; i < ambientTapCount; i++) {
@@ -434,7 +440,7 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                 // Taps alive 10+ seconds post-warmup: auto-learn as ambient.
                 // FHSS drone taps expire in ~3 cycles ≈ 2s per frequency (drone hops
                 // away). Infrastructure persists on fixed frequencies for minutes+.
-                else if ((now - tapList[i].firstSeenMs) > 10000) {
+                else if ((now - tapList[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
                     recordAmbientTap(tapList[i].frequency, tapList[i].sf);
                 }
             }

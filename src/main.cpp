@@ -96,9 +96,8 @@ static const char* threatLevelStr(ThreatLevel t) {
     }
 }
 
-// RSSI sweep runs every Nth CAD cycle — CAD is the fast path (~80ms),
-// RSSI is background maintenance (~2.2s). Keeps first-alert latency low.
-static const int RSSI_SWEEP_INTERVAL = 3;
+// RSSI_SWEEP_INTERVAL from sentry_config.h
+#include "sentry_config.h"
 
 // Core 1 — LoRa SPI is only touched here, no mutex needed for the radio
 static void loRaScanTask(void* param) {

@@ -2,14 +2,12 @@
 #include "drone_signatures.h"
 #include "ambient_filter.h"
 #include "cad_scanner.h"
+#include "sentry_config.h"
 #include <Arduino.h>
 #include <string.h>
 
 // ── Tracked signal persistence ──────────────────────────────────────────────
-
-static const int MAX_TRACKED = 8;
-static const float TRACK_FREQ_TOLERANCE = 0.2;  // MHz — ±200 kHz
-static const int PERSIST_THRESHOLD = 3;          // consecutive sweeps to confirm
+// Constants from sentry_config.h: MAX_TRACKED, TRACK_FREQ_TOLERANCE, PERSIST_THRESHOLD
 
 struct TrackedSignal {
     float     frequency;
@@ -24,7 +22,7 @@ static TrackedSignal tracked24[MAX_TRACKED];    // 2.4 GHz
 
 // ── Protocol-level persistence (catches FHSS) ─────────────────────────────
 
-static const int MAX_PROTO_TRACKED = 14;
+// MAX_PROTO_TRACKED from sentry_config.h
 
 struct ProtoTracker {
     const DroneProtocol* protocol;
@@ -50,8 +48,7 @@ static int recentHitCountThisCycle = 0;
 // FHSS drones spread energy across 80 channels — individual peaks come and
 // go, but the band average rises measurably.
 
-static const int BAND_ENERGY_HISTORY = 10;
-static const float BAND_ENERGY_THRESHOLD_DB = 3.0f;
+// BAND_ENERGY_HISTORY, BAND_ENERGY_THRESH_DB from sentry_config.h
 static float bandEnergyHistory[BAND_ENERGY_HISTORY];
 static int bandEnergyIdx = 0;
 static int bandEnergySamples = 0;
@@ -84,14 +81,15 @@ static void updateBandEnergy(const float* rssi) {
     if (bandEnergySamples < BAND_ENERGY_HISTORY) bandEnergySamples++;
 
     // Flag elevated if current average exceeds rolling baseline by threshold
-    bandEnergyElevated = (bandEnergySamples >= 3) && (currentAvg > baseline + BAND_ENERGY_THRESHOLD_DB);
+    bandEnergyElevated = (bandEnergySamples >= 3) && (currentAvg > baseline + BAND_ENERGY_THRESH_DB);
 }
 
 // ── Threat state machine ────────────────────────────────────────────────────
 
 static ThreatLevel currentThreat = THREAT_CLEAR;
 static unsigned long lastThreatEventMs = 0;
-static const unsigned long COOLDOWN_MS = 30000;
+// COOLDOWN_MS from sentry_config.h
+static int cleanCycleCount = 0;
 
 // ── Noise floor calculation ─────────────────────────────────────────────────
 
@@ -116,9 +114,7 @@ static float computeNoiseFloor(const float* rssi, int count) {
 
 // ── Peak extraction (strongest-peak selection) ──────────────────────────────
 
-static const float PEAK_THRESHOLD_DB = 10.0;
-static const float PEAK_ABS_FLOOR_DBM = -85.0;
-static const int MAX_PEAKS = 8;
+// PEAK_THRESHOLD_DB, PEAK_ABS_FLOOR_DBM, MAX_PEAKS from sentry_config.h
 
 struct DetectedPeak {
     float frequency;
@@ -462,11 +458,14 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     // recentHits alone is NOT sufficient — LoRa-rich environments produce 10+ ambient
     // hits in 30s even with the warmup filter.
     bool confirmedCad = (cadDetectionsThisCycle > 0) || (fskDetectionsThisCycle > 0);
+    // recentHits alone NOT sufficient for CRITICAL — LoRa-rich environments
+    // produce 6+ ambient hits in 30s. Require RSSI corroboration.
     bool highConfidence = (rssiPersistentUS && recentHits >= 3)
                           || (confirmedCad && cadDetectionsThisCycle >= 2);
 
     // MEDIUM: RSSI persistence + any CAD evidence, OR persistent RSSI in US band alone,
     //         OR band energy elevated.
+    // MEDIUM: RSSI persistence in US band, band energy elevated.
     bool mediumConfidence = (rssiPersistentUS && recentHits >= 1)
                             || rssiPersistentUS || bandEnergyElevated;
 
@@ -505,7 +504,7 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
         lastThreatEventMs = now;
     }
 
-    // Cooldown: decay one step every 30s
+    // Cooldown: decay one step every COOLDOWN_MS
     if (desired <= currentThreat && currentThreat > THREAT_CLEAR) {
         if (now - lastThreatEventMs > COOLDOWN_MS) {
             desired = (ThreatLevel)(currentThreat - 1);
@@ -513,6 +512,29 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
         } else {
             desired = currentThreat;
         }
+    }
+
+    // Rapid-clear: if ALL detection sources are silent for N consecutive cycles,
+    // skip cooldown decay and jump directly to CLEAR. Gives operator fast
+    // feedback that the threat has left.
+    // Rapid-clear checks CAD silence only — RSSI persistence decays slowly
+    // (3 sweep cycles × 3 CAD cycles each = 9+ cycles) and would prevent
+    // rapid-clear from ever firing in the useful timeframe.
+    // Check that no escalation-feeding signals exist. Pending taps (1 hit) are
+    // always churning on a LoRa-rich bench and don't block rapid-clear.
+    bool allClean = (cadDetectionsThisCycle == 0)
+                    && (strongPendingCadThisCycle == 0);
+
+    if (allClean) {
+        cleanCycleCount++;
+        if (cleanCycleCount >= RAPID_CLEAR_CLEAN_CYCLES && currentThreat > THREAT_CLEAR) {
+            Serial.printf("[RAPID-CLEAR] %d clean cycles — forcing CLEAR\n", cleanCycleCount);
+            desired = THREAT_CLEAR;
+            cleanCycleCount = 0;
+            lastThreatEventMs = now;
+        }
+    } else {
+        cleanCycleCount = 0;
     }
 
     // Emit events on change
