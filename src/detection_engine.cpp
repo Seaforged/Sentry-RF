@@ -458,16 +458,18 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     // recentHits alone is NOT sufficient — LoRa-rich environments produce 10+ ambient
     // hits in 30s even with the warmup filter.
     bool confirmedCad = (cadDetectionsThisCycle > 0) || (fskDetectionsThisCycle > 0);
-    // recentHits alone NOT sufficient for CRITICAL — LoRa-rich environments
-    // produce 6+ ambient hits in 30s. Require RSSI corroboration.
-    bool highConfidence = (rssiPersistentUS && recentHits >= 3)
+    // HIGH: RSSI persistence + live CAD taps (multiple active non-ambient taps
+    // this cycle), OR confirmed CAD taps. Uses live tap count instead of 30s
+    // buffer to avoid accumulating ambient hits.
+    bool highConfidence = (rssiPersistentUS && totalActiveTapsThisCycle >= 3)
                           || (confirmedCad && cadDetectionsThisCycle >= 2);
 
-    // MEDIUM: RSSI persistence + any CAD evidence, OR persistent RSSI in US band alone,
-    //         OR band energy elevated.
-    // MEDIUM: RSSI persistence in US band, band energy elevated.
-    bool mediumConfidence = (rssiPersistentUS && recentHits >= 1)
-                            || rssiPersistentUS || bandEnergyElevated;
+    // MEDIUM: RSSI persistence in US band WITH live CAD activity (taps actively
+    // present this cycle), OR band energy elevated.
+    // Uses totalActiveTaps (non-ambient, this cycle) instead of recentHits —
+    // the 30s buffer accumulates ambient hits on LoRa-rich bench.
+    bool mediumConfidence = (rssiPersistentUS && totalActiveTapsThisCycle >= 1)
+                            || bandEnergyElevated;
 
     ThreatLevel desired = THREAT_CLEAR;
 
@@ -492,8 +494,23 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     }
 
     // Warmup guard — both RSSI and CAD warmups must complete
-    if ((!ambientFilterReady() || !cadWarmupComplete()) && desired > THREAT_ADVISORY) {
-        desired = THREAT_ADVISORY;
+    static bool postWarmupReset = false;
+    bool warmupActive = !ambientFilterReady() || !cadWarmupComplete();
+    if (warmupActive) {
+        if (desired > THREAT_ADVISORY) desired = THREAT_ADVISORY;
+        postWarmupReset = false;
+    } else if (!postWarmupReset) {
+        // One-time reset when warmup ends: clear persistence counters that
+        // accumulated from ambient signals during warmup. A real drone arriving
+        // after warmup will rebuild these within seconds.
+        postWarmupReset = true;
+        for (int t = 0; t < MAX_TRACKED; t++) { tracked[t].active = false; }
+        for (int t = 0; t < MAX_TRACKED; t++) { tracked24[t].active = false; }
+        for (int i = 0; i < MAX_PROTO_TRACKED; i++) { protoTracked[i].active = false; }
+        memset(bandEnergyHistory, 0, sizeof(bandEnergyHistory));
+        bandEnergyIdx = 0; bandEnergySamples = 0; bandEnergyElevated = false;
+        cleanCycleCount = 0;
+        desired = THREAT_CLEAR;
     }
 
     unsigned long now = millis();
@@ -527,7 +544,7 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
 
     if (allClean) {
         cleanCycleCount++;
-        if (cleanCycleCount >= RAPID_CLEAR_CLEAN_CYCLES && currentThreat > THREAT_CLEAR) {
+        if (cleanCycleCount >= RAPID_CLEAR_CLEAN_CYCLES && currentThreat >= THREAT_WARNING) {
             Serial.printf("[RAPID-CLEAR] %d clean cycles — forcing CLEAR\n", cleanCycleCount);
             desired = THREAT_CLEAR;
             cleanCycleCount = 0;

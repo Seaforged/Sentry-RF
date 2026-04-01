@@ -15,7 +15,7 @@ static const int   MAX_PEAKS             = 8;       // max peaks extracted per s
 
 // ── Band Energy Trending (902-928 MHz) ────────────────────────────────
 static const int   BAND_ENERGY_HISTORY   = 10;      // sweeps in rolling average
-static const float BAND_ENERGY_THRESH_DB = 5.0f;    // dB above baseline to flag elevated (was 3.0)
+static const float BAND_ENERGY_THRESH_DB = 5.0f;    // dB above baseline (3.0 causes baseline false WARNING)
 
 // ── RSSI Persistence ──────────────────────────────────────────────────
 static const int   MAX_TRACKED           = 8;       // max tracked persistent signals
