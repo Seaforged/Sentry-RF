@@ -41,7 +41,7 @@ static int cadDetectionsThisCycle = 0;
 static int fskDetectionsThisCycle = 0;
 static int strongPendingCadThisCycle = 0;
 static int totalActiveTapsThisCycle = 0;
-static int recentHitCountThisCycle = 0;
+static int diversityCountThisCycle = 0;
 
 // ── Band energy trending (902-928 MHz) ──────────────────────────────────
 // Tracks average RSSI across US band to detect aggregate FHSS energy rise.
@@ -423,17 +423,13 @@ static void emitFskEvent(float freq, uint8_t severity) {
 }
 
 static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
-    // ── CAD-as-discriminator threat assessment ─────────────────────────
+    // ── Frequency-diversity threat assessment ──────────────────────────
     //
-    // Philosophy: RSSI detects presence. CAD discriminates modulation.
-    // One CAD hit has near-zero false alarm rate against non-LoRa signals.
-    // So CAD + RSSI corroboration = definitive drone identification.
-    //
-    // HIGH:   CAD confirmed (3+ hits alone) OR any CAD activity + persistent RSSI
-    // MEDIUM: Persistent RSSI in US band, OR band energy elevated, OR strong CAD
-    // LOW:    RSSI in EU overlap band without CAD
+    // The FHSS discriminator: count DISTINCT frequencies with CAD hits
+    // in a 5-second window. Drones hit many frequencies (5-10); ambient
+    // infrastructure hits 1-3 fixed frequencies. The SPREAD is the signal.
 
-    // RSSI persistence — per-frequency and per-protocol
+    // RSSI persistence (backup path for long-range / weak-signal drones)
     int freqSubGHz  = countPersistentDrone();
     int freqUS      = countPersistentDroneUS();
     int freq24GHz   = countPersistentDrone24();
@@ -444,53 +440,47 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     bool gnssAnomaly = integrity.jammingDetected || integrity.spoofingDetected ||
                        integrity.cnoAnomalyDetected;
 
-    // RSSI persistence in the US band (no cell tower overlap)
     int protoUS = countPersistentProtocolUS();
     bool rssiPersistentUS = (freqUS >= 1) || (protoUS >= 1);
 
-    // Rolling 30-second non-ambient CAD hit count — aggregates hits across ALL
-    // frequencies/SFs. Catches FHSS pattern where no single frequency accumulates
-    // consecutive hits but the aggregate rate is clearly above ambient.
-    int recentHits = recentHitCountThisCycle;
+    // Frequency diversity: the primary FHSS discriminator
+    int diversity = diversityCountThisCycle;
 
-    // HIGH: RSSI persistence + 3+ recent CAD hits in 30s (two independent sensors),
-    // OR 2+ confirmed non-ambient taps (consecutive-hit path).
-    // recentHits alone is NOT sufficient — LoRa-rich environments produce 10+ ambient
-    // hits in 30s even with the warmup filter.
+    // Confirmed CAD taps (consecutive-hit path still works independently)
     bool confirmedCad = (cadDetectionsThisCycle > 0) || (fskDetectionsThisCycle > 0);
-    // HIGH: RSSI persistence + live CAD taps (multiple active non-ambient taps
-    // this cycle), OR confirmed CAD taps. Uses live tap count instead of 30s
-    // buffer to avoid accumulating ambient hits.
-    bool highConfidence = (rssiPersistentUS && totalActiveTapsThisCycle >= 3)
+
+    // HIGH: strong FHSS pattern OR confirmed consecutive taps
+    bool highConfidence = (diversity >= DIVERSITY_CRITICAL)
+                          || (diversity >= DIVERSITY_WARNING && rssiPersistentUS)
                           || (confirmedCad && cadDetectionsThisCycle >= 2);
 
-    // MEDIUM: RSSI persistence in US band WITH live CAD activity (taps actively
-    // present this cycle), OR band energy elevated.
-    // Uses totalActiveTaps (non-ambient, this cycle) instead of recentHits —
-    // the 30s buffer accumulates ambient hits on LoRa-rich bench.
-    bool mediumConfidence = (rssiPersistentUS && totalActiveTapsThisCycle >= 1)
+    // MEDIUM: moderate FHSS pattern OR band energy elevated
+    bool mediumConfidence = (diversity >= DIVERSITY_WARNING)
                             || bandEnergyElevated;
+
+    // LOW: any diversity OR RSSI persistence OR 2.4 GHz
+    bool lowConfidence = (diversity >= 1)
+                         || rssiPersistentUS
+                         || (persistent24GHz >= 1);
 
     ThreatLevel desired = THREAT_CLEAR;
 
-    // HIGH: CAD discriminated → CRITICAL
     if (highConfidence) {
         desired = THREAT_CRITICAL;
-    }
-    // MEDIUM: persistent RSSI in US band or 2.4 GHz → WARNING
-    else if (mediumConfidence || persistent24GHz >= 1) {
+    } else if (mediumConfidence) {
         desired = THREAT_WARNING;
-        if (gnssAnomaly) desired = THREAT_CRITICAL;
-    }
-    // LOW: RSSI-only in EU overlap band → ADVISORY max
-    else if (freqSubGHz >= 1 || protoSubGHz >= 1) {
+    } else if (lowConfidence) {
         desired = THREAT_ADVISORY;
-        if (gnssAnomaly) desired = THREAT_WARNING;
+    } else if (freqSubGHz >= 1 || protoSubGHz >= 1) {
+        desired = THREAT_ADVISORY;
     }
 
-    // GNSS anomaly alone → WARNING
-    if (desired < THREAT_WARNING && gnssAnomaly) {
+    // GNSS anomaly escalation
+    if (gnssAnomaly && desired < THREAT_WARNING) {
         desired = THREAT_WARNING;
+    }
+    if (gnssAnomaly && diversity >= 1 && desired < THREAT_CRITICAL) {
+        desired = THREAT_CRITICAL;
     }
 
     // Warmup guard — both RSSI and CAD warmups must complete
@@ -537,10 +527,9 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     // Rapid-clear checks CAD silence only — RSSI persistence decays slowly
     // (3 sweep cycles × 3 CAD cycles each = 9+ cycles) and would prevent
     // rapid-clear from ever firing in the useful timeframe.
-    // Check that no escalation-feeding signals exist. Pending taps (1 hit) are
-    // always churning on a LoRa-rich bench and don't block rapid-clear.
-    bool allClean = (cadDetectionsThisCycle == 0)
-                    && (strongPendingCadThisCycle == 0);
+    // If diversity is 0, no non-ambient CAD hits in the last 5 seconds — all clear.
+    bool allClean = (diversityCountThisCycle == 0)
+                    && (cadDetectionsThisCycle == 0);
 
     if (allClean) {
         cleanCycleCount++;
@@ -591,7 +580,7 @@ void detectionEngineInit() {
     fskDetectionsThisCycle = 0;
     strongPendingCadThisCycle = 0;
     totalActiveTapsThisCycle = 0;
-    recentHitCountThisCycle = 0;
+    diversityCountThisCycle = 0;
     memset(bandEnergyHistory, 0, sizeof(bandEnergyHistory));
     bandEnergyIdx = 0;
     bandEnergySamples = 0;
@@ -601,12 +590,12 @@ void detectionEngineInit() {
     ambientFilterInit();
 }
 
-void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad, int activeTaps, int recentHits) {
+void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad, int activeTaps, int diversityCount) {
     cadDetectionsThisCycle = cadCount;
     fskDetectionsThisCycle = fskCount;
     strongPendingCadThisCycle = strongPendingCad;
     totalActiveTapsThisCycle = activeTaps;
-    recentHitCountThisCycle = recentHits;
+    diversityCountThisCycle = diversityCount;
 }
 
 ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,

@@ -122,7 +122,7 @@ static void loRaScanTask(void* param) {
                                           localResult.sweepTimeMs > 0 ? &localResult : nullptr);
         detectionEngineSetCadFsk(cadFsk.confirmedCadCount, cadFsk.confirmedFskCount,
                                 cadFsk.strongPendingCad, cadFsk.totalActiveTaps,
-                                cadFsk.recentHitCount);
+                                cadFsk.diversityCount);
 
         unsigned long cadDone = millis();
 
@@ -246,9 +246,9 @@ static void loRaScanTask(void* param) {
                               cadDone - cycleStart, threatLevelStr(threat));
             }
 
-            Serial.printf("[CAD] cycle=%u conf=%d strong=%d pend=%d taps=%d recent=%d\n",
+            Serial.printf("[CAD] cycle=%u conf=%d strong=%d pend=%d taps=%d div=%d\n",
                           sweepNum, cadFsk.confirmedCadCount, cadFsk.strongPendingCad,
-                          cadFsk.pendingTaps, cadFsk.totalActiveTaps, cadFsk.recentHitCount);
+                          cadFsk.pendingTaps, cadFsk.totalActiveTaps, cadFsk.diversityCount);
 
             xSemaphoreGive(serialMutex);
         }

@@ -108,25 +108,60 @@ static void recordAmbientTap(float freq, uint8_t sf) {
     }
 }
 
-// ── Recent CAD hit ring buffer (Part 3) ─────────────────────────────────────
-// Tracks timestamps of non-ambient CAD hits within a 30-second window.
-// Aggregates hits across ALL frequencies/SFs — catches FHSS pattern where
-// no single frequency accumulates consecutive hits.
+// ── Frequency Diversity Tracker ──────────────────────────────────────────────
+// Tracks DISTINCT frequencies that produced non-ambient CAD hits within a
+// sliding time window. FHSS drones hit many different frequencies (5-10 in 5s);
+// infrastructure hits the same 1-3 frequencies repeatedly.
+// This is the primary FHSS discriminator — count ≠ frequency spread.
 
-// Constants from sentry_config.h: RECENT_HIT_BUF_SIZE, RECENT_HIT_WINDOW_MS
-static unsigned long recentHitTimestamps[RECENT_HIT_BUF_SIZE];
-static int recentHitWriteIdx = 0;
+struct DiversitySlot {
+    float frequency;
+    uint8_t sf;
+    unsigned long lastHitMs;
+    bool active;
+};
 
-static void recordRecentHit() {
-    recentHitTimestamps[recentHitWriteIdx] = millis();
-    recentHitWriteIdx = (recentHitWriteIdx + 1) % RECENT_HIT_BUF_SIZE;
+static DiversitySlot diversitySlots[MAX_DIVERSITY_SLOTS];
+
+static void recordDiversityHit(float freq, uint8_t sf) {
+    unsigned long now = millis();
+
+    // Check if this frequency/SF already has a slot
+    for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
+        if (diversitySlots[i].active &&
+            diversitySlots[i].sf == sf &&
+            fabsf(diversitySlots[i].frequency - freq) <= TAP_FREQ_TOL) {
+            diversitySlots[i].lastHitMs = now;
+            return;  // Same frequency — no new diversity
+        }
+    }
+
+    // New frequency — find an empty slot or evict the oldest
+    int bestSlot = 0;
+    unsigned long oldestTime = ULONG_MAX;
+    for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
+        if (!diversitySlots[i].active) {
+            bestSlot = i;
+            break;
+        }
+        if (diversitySlots[i].lastHitMs < oldestTime) {
+            oldestTime = diversitySlots[i].lastHitMs;
+            bestSlot = i;
+        }
+    }
+
+    diversitySlots[bestSlot].frequency = freq;
+    diversitySlots[bestSlot].sf = sf;
+    diversitySlots[bestSlot].lastHitMs = now;
+    diversitySlots[bestSlot].active = true;
 }
 
-static int countRecentHits() {
+static int countDiversity(unsigned long windowMs) {
     unsigned long now = millis();
     int count = 0;
-    for (int i = 0; i < RECENT_HIT_BUF_SIZE; i++) {
-        if (recentHitTimestamps[i] > 0 && (now - recentHitTimestamps[i]) < RECENT_HIT_WINDOW_MS) {
+    for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
+        if (diversitySlots[i].active &&
+            (now - diversitySlots[i].lastHitMs) < windowMs) {
             count++;
         }
     }
@@ -142,8 +177,7 @@ bool cadWarmupComplete() {
 void cadScannerInit() {
     memset(tapList, 0, sizeof(tapList));
     memset(ambientTaps, 0, sizeof(ambientTaps));
-    memset(recentHitTimestamps, 0, sizeof(recentHitTimestamps));
-    recentHitWriteIdx = 0;
+    memset(diversitySlots, 0, sizeof(diversitySlots));
     ambientTapCount = 0;
     warmupCycleCount = 0;
     warmupComplete = false;
@@ -273,6 +307,8 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
         radio.setFrequency(tapList[i].frequency);
         if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
             tapHit(&tapList[i]);
+            if (warmupComplete)
+                recordDiversityHit(tapList[i].frequency, tapList[i].sf);
         } else {
             bool adjHit = false;
             float spacing = 0.325f;
@@ -282,6 +318,8 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                     radio.setFrequency(adjFreq);
                     if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
                         tapHit(&tapList[i]);
+                        if (warmupComplete)
+                            recordDiversityHit(adjFreq, tapList[i].sf);
                         adjHit = true;
                         break;
                     }
@@ -325,8 +363,8 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                     CadTap* existing = findTap(freq, 6);
                     if (existing) tapHit(existing);
                     else addTap(freq, 6);
-                    if (warmupComplete && !isAmbientCadSource(freq, 6))
-                        recordRecentHit();
+                    if (warmupComplete)
+                        recordDiversityHit(freq, 6);
                 }
                 guidedScans++;
             }
@@ -373,9 +411,8 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
             if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
                 CadTap* existing = findTap(freq, sc.sf);
                 if (!existing) addTap(freq, sc.sf);
-                // Record non-ambient hits for the rolling 30s counter
-                if (warmupComplete && !isAmbientCadSource(freq, sc.sf))
-                    recordRecentHit();
+                if (warmupComplete)
+                    recordDiversityHit(freq, sc.sf);
             }
         }
     }
@@ -457,7 +494,7 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     }
 
     countConfirmed(result.confirmedCadCount, result.confirmedFskCount, result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
-    result.recentHitCount = countRecentHits();
+    result.diversityCount = countDiversity(DIVERSITY_WINDOW_MS);
 
     return result;
 }

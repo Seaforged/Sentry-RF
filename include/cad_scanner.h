@@ -27,7 +27,7 @@ struct CadFskResult {
     int strongPendingCad;     // CAD taps with exactly 2 consecutive hits
     int pendingTaps;          // active taps not yet confirmed
     int totalActiveTaps;      // all active taps (any hit count)
-    int recentHitCount;       // non-ambient CAD hits in last 30s (any freq/SF)
+    int diversityCount;       // distinct non-ambient frequencies with CAD hits in window
 };
 
 // ── Public API ──────────────────────────────────────────────────────────────
