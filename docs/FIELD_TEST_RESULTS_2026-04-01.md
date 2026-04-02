@@ -1,6 +1,6 @@
 # SENTRY-RF Field Test Results
 **Date:** April 1, 2026
-**Location:** Rural NC (34.80N, -79.36W)
+**Location:** Rural North Carolina, USA
 **Firmware:** v1.4.0 with field-calibrated diversity thresholds (WARNING=3, CRITICAL=5)
 
 ## Equipment
@@ -42,35 +42,40 @@ JJ stationary at 10 dBm (10 mW). SENTRY walking 2-200m around compound with meta
 
 **Case attenuation:** COM8 89% vs COM9 41% — the 3D printed case reduces detection performance by approximately half, equivalent to ~3 dB signal loss.
 
-## Test 3: ELRS Detection (Long Range, JJ at 22 dBm)
+## Test 3: ELRS Detection (Driving, JJ at 22 dBm)
 
-JJ stationary at 22 dBm (158 mW). SENTRY driving on rural road, 2.8 to 3.3 km away, then returning.
+JJ stationary at 22 dBm (158 mW). SENTRY driving on rural road, 0 to ~660m away, then returning. Duration ~14 minutes.
 
-### Distance vs Detection (COM8)
+**Note:** Initial analysis incorrectly placed JJ at the compound location (2.8 km away). Corrected after confirming JJ was positioned near the drive starting point.
+
+### Distance vs Detection (COM8, outbound)
 
 | Range | Windows | Pd (div>=3) | Avg div | Max div |
 |-------|---------|------------|---------|---------|
-| 2.8-2.9 km | 14 | 43% | 2.5 | 8 |
-| 2.9-3.0 km | 13 | **77%** | 2.9 | 5 |
-| 3.0-3.1 km | 12 | **58%** | 3.1 | 9 |
-| 3.1-3.2 km | 4 | 25% | 1.5 | 3 |
-| 3.2-3.3 km | 10 | 50% | 2.5 | 4 |
-| 3.3+ km | 3 | 33% | 1.7 | 3 |
+| 0-99m | 14 | 36% | 2.1 | 8 |
+| 100-199m | 8 | **75%** | 3.2 | 5 |
+| 200-299m | 9 | 56% | 2.3 | 3 |
+| 300-399m | 10 | **70%** | 3.5 | 9 |
+| 400-499m | 3 | 33% | 1.3 | 3 |
+| 500-599m | 7 | 43% | 2.6 | 4 |
+| 600-699m | 6 | 50% | 2.0 | 3 |
 
-**Return trip (2.8 km, driving back toward JJ):** 93% Pd, avg div=5.0, max div=14
+**Return trip (back to 0m):** 93% Pd, avg div=5.0, max div=14
 
-**Maximum detection distance:** 3,305 meters (div=3)
+**Maximum detection distance:** 637 meters (div=3)
+
+### Notes on 0-99m low Pd
+The 0-99m bin shows only 36% Pd because the first ~100 seconds include the warmup period where diversity recording is disabled (div=0 during warmup). Post-warmup close-range performance matches Site 1 (89%+ Pd).
 
 ### Link Budget
 
 | Distance | FSPL | Rx Power | Margin over sensitivity |
 |----------|------|----------|----------------------|
-| 2.8 km | 100.6 dB | -78.6 dBm | 29.4 dB |
-| 3.0 km | 101.2 dB | -79.2 dBm | 28.8 dB |
-| 3.3 km | 102.0 dB | -80.0 dBm | 28.0 dB |
+| 100m | 71.7 dB | -49.7 dBm | 58.3 dB |
+| 300m | 81.2 dB | -59.2 dBm | 48.8 dB |
+| 637m | 87.8 dB | -65.8 dBm | 42.2 dB |
 
-SX1262 CAD sensitivity at SF6/BW500: approximately -108 dBm.
-Signal at max detection distance is 28 dB above sensitivity — the limiting factor is scan probability (catching 1 of 80 FHSS channels), not receiver sensitivity.
+At all test distances, the signal was 42+ dB above the SX1262 sensitivity floor (-108 dBm). The limiting factor for Pd is scan probability (catching FHSS hops), not signal strength.
 
 ## Key Findings
 
@@ -80,10 +85,11 @@ Signal at max detection distance is 28 dB above sensitivity — the limiting fac
 - Clean separation enables WARNING=3, CRITICAL=5 thresholds
 - Zero false alarms during 120-second baseline
 
-### 2. Detection Range Exceeds Expectations
-- 3.3 km detection at 158 mW (22 dBm)
-- 100% signal presence at 2-200m through metal obstacles at 10 mW
-- At typical ELRS power (250 mW-1W), range would extend to 5+ km
+### 2. Detection at Range
+- 637m detection at 158 mW (22 dBm) while driving
+- 89% Pd at 2-200m through metal obstacles at 10 mW
+- Signal remains 42+ dB above sensitivity at 637m
+- Scan probability (not sensitivity) is the detection bottleneck
 
 ### 3. 3D Printed Case Attenuates Signal
 - COM8 (bare): 89% Pd at short range
@@ -93,25 +99,24 @@ Signal at max detection distance is 28 dB above sensitivity — the limiting fac
 
 ### 4. NLOS Detection Works
 - Metal buildings and vehicles did not prevent detection at 2-200m
-- Signal drops during NLOS segments at long range but recovers
+- Signal drops during NLOS segments but recovers
 - The system is suitable for urban/compound patrol scenarios
 
 ### 5. GPS Integrity Monitoring Working
-- 25 satellites, 3D fix, 0m horizontal accuracy
+- 25 satellites, 3D fix, sub-meter horizontal accuracy
 - Jamming indicator: 0 (no interference)
 - Spoofing detection: 0 (no anomaly)
 - C/N0 standard deviation: 4.6 dBHz (healthy)
 
-## Predicted Detection Ranges (Pd = 50%)
+## Predicted Detection Ranges
 
-Based on field-measured Rx power threshold of approximately -80 dBm at Pd=50%:
+Based on the field observation that Pd is limited by scan probability (not sensitivity) at these power levels, with 42 dB of margin remaining at 637m:
 
-| TX Power | Typical Use | Predicted Range |
-|----------|-----------|-----------------|
-| 10 mW (10 dBm) | Low-power ELRS | ~300m |
-| 50 mW (17 dBm) | Standard ELRS | ~900m |
-| 158 mW (22 dBm) | ELRS (validated) | ~3.1 km |
-| 500 mW (27 dBm) | High-power ELRS | ~5.5 km |
-| 1 W (30 dBm) | Crossfire max | ~9.8 km |
+| TX Power | Typical Use | Estimated Range (Pd=50%) |
+|----------|-----------|--------------------------|
+| 10 mW (10 dBm) | Low-power ELRS | 200-400m (validated at 200m NLOS) |
+| 158 mW (22 dBm) | ELRS | 500-700m (validated at 637m) |
+| 500 mW (27 dBm) | High-power ELRS | 1-2 km (extrapolated) |
+| 1 W (30 dBm) | Crossfire max | 2-4 km (extrapolated) |
 
-Note: These are conservative estimates based on actual field data, not free-space theoretical calculations.
+Note: Range predictions beyond validated distances are extrapolations. The scan probability bottleneck means range scales slower than free-space path loss alone would predict. Field testing at longer distances with higher TX power is needed.
