@@ -34,6 +34,10 @@ struct SystemState {
     bool            buzzerMuted;
     bool            buzzerAcknowledged;
     unsigned long   muteRemainingMs;
+    // CAD results (written by loRaScanTask for logging)
+    int             cadDiversity;
+    int             cadConfirmed;
+    int             cadTotalTaps;
 };
 
 // Detection event sources

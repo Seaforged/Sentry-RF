@@ -9,10 +9,8 @@ static unsigned long lastPollMs = 0;
 static const unsigned long GPS_POLL_INTERVAL_MS = 1000;
 
 // Production C/N0 minimum — 15 dB-Hz rejects noise while keeping usable satellites.
-// For indoor bench testing, temporarily lower to 6.
-// WARNING: Values below 10 will allow weak/multipath signals into the fix,
-// degrading position accuracy and integrity monitoring reliability.
-static const uint8_t GPS_MIN_CNO = 15;
+// GPS_MIN_CNO from sentry_config.h (15=field, 6=indoor bench)
+#include "sentry_config.h"
 
 static bool connectAtBaud(uint32_t baud) {
     Serial1.begin(baud, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);

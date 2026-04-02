@@ -143,6 +143,9 @@ static void loRaScanTask(void* param) {
         // Store threat + CAD results into shared state
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             systemState.threatLevel = threat;
+            systemState.cadDiversity = cadFsk.diversityCount;
+            systemState.cadConfirmed = cadFsk.confirmedCadCount;
+            systemState.cadTotalTaps = cadFsk.totalActiveTaps;
             xSemaphoreGive(stateMutex);
         }
 

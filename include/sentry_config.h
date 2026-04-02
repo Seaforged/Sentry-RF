@@ -79,6 +79,7 @@ static const float AMBIENT_UNLOCK_SHIFT    = 6.0f;  // dB drift to unlock a base
 static const float AMBIENT_MIN_ABOVE_NF    = 5.0f;  // dB above NF to qualify for baseline
 
 // ── GNSS Integrity ────────────────────────────────────────────────────
+static const uint8_t GPS_MIN_CNO           = 15;    // dB-Hz minimum (6=indoor bench, 15=field)
 static const float CNO_STDDEV_SPOOF_THRESH = 2.0f;  // dB-Hz — below this = spoofing suspected
 static const int   MIN_ELEV_FOR_CNO        = 20;    // degrees — exclude low-elevation sats
 

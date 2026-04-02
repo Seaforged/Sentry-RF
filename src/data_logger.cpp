@@ -18,13 +18,15 @@ static const char* CSV_HEADER =
 
 static SPIClass sdSPI(FSPI);
 static File logFile;
+static File jsonlFile;
 
-static bool findNextFilename(char* buf, int bufLen) {
+static int findNextIndex() {
     for (int i = 0; i < 10000; i++) {
-        snprintf(buf, bufLen, "/log_%04d.csv", i);
-        if (!SD.exists(buf)) return true;
+        char buf[24];
+        snprintf(buf, sizeof(buf), "/log_%04d.csv", i);
+        if (!SD.exists(buf)) return i;
     }
-    return false;
+    return -1;
 }
 
 bool loggerInit() {
@@ -34,41 +36,73 @@ bool loggerInit() {
         return false;
     }
 
-    char filename[24];
-    if (!findNextFilename(filename, sizeof(filename))) {
+    int idx = findNextIndex();
+    if (idx < 0) {
         Serial.println("[LOG] No available filename");
         return false;
     }
 
-    logFile = SD.open(filename, FILE_WRITE);
+    char csvName[24], jsonlName[28];
+    snprintf(csvName, sizeof(csvName), "/log_%04d.csv", idx);
+    snprintf(jsonlName, sizeof(jsonlName), "/field_%04d.jsonl", idx);
+
+    logFile = SD.open(csvName, FILE_WRITE);
     if (!logFile) {
-        Serial.printf("[LOG] Failed to create %s\n", filename);
+        Serial.printf("[LOG] Failed to create %s\n", csvName);
         return false;
     }
-
     logFile.println(CSV_HEADER);
     logFile.flush();
-    Serial.printf("[LOG] SD logging to %s\n", filename);
+
+    jsonlFile = SD.open(jsonlName, FILE_WRITE);
+    if (jsonlFile) {
+        Serial.printf("[LOG] Field test JSONL: %s\n", jsonlName);
+    }
+
+    Serial.printf("[LOG] SD logging to %s\n", csvName);
     return true;
 }
 
 void loggerWrite(const SystemState& state, uint32_t sweepNum) {
-    if (!logFile) return;
+    unsigned long ts = millis();
 
-    logFile.printf("%lu,%u,%d,%.1f,%.1f,%.6f,%.6f,%d,%d,%d,%d,%.1f\n",
-                   millis(), sweepNum, state.threatLevel,
-                   state.spectrum.peakFreq, state.spectrum.peakRSSI,
-                   state.gps.latDeg7 / 1e7, state.gps.lonDeg7 / 1e7,
-                   state.gps.fixType, state.gps.numSV,
-                   state.gps.jamInd, state.gps.spoofDetState,
-                   state.integrity.cnoStdDev);
+    // Legacy CSV
+    if (logFile) {
+        logFile.printf("%lu,%u,%d,%.1f,%.1f,%.6f,%.6f,%d,%d,%d,%d,%.1f\n",
+                       ts, sweepNum, state.threatLevel,
+                       state.spectrum.peakFreq, state.spectrum.peakRSSI,
+                       state.gps.latDeg7 / 1e7, state.gps.lonDeg7 / 1e7,
+                       state.gps.fixType, state.gps.numSV,
+                       state.gps.jamInd, state.gps.spoofDetState,
+                       state.integrity.cnoStdDev);
+    }
+
+    // JSONL field test log — one JSON object per line
+    if (jsonlFile) {
+        jsonlFile.printf("{\"t\":%lu,\"c\":%u,\"threat\":%d,"
+                         "\"div\":%d,\"conf\":%d,\"taps\":%d,"
+                         "\"peak_mhz\":%.1f,\"peak_dbm\":%.1f,"
+                         "\"lat\":%.7f,\"lon\":%.7f,\"fix\":%d,\"sv\":%d,"
+                         "\"jam\":%d,\"spoof\":%d,\"cno_sd\":%.1f}\n",
+                         ts, sweepNum, (int)state.threatLevel,
+                         state.cadDiversity, state.cadConfirmed, state.cadTotalTaps,
+                         state.spectrum.peakFreq, state.spectrum.peakRSSI,
+                         state.gps.latDeg7 / 1e7, state.gps.lonDeg7 / 1e7,
+                         state.gps.fixType, state.gps.numSV,
+                         state.gps.jamInd, state.gps.spoofDetState,
+                         state.integrity.cnoStdDev);
+    }
 
     writeCount++;
-    if (writeCount % FLUSH_INTERVAL == 0) logFile.flush();
+    if (writeCount % FLUSH_INTERVAL == 0) {
+        if (logFile) logFile.flush();
+        if (jsonlFile) jsonlFile.flush();
+    }
 }
 
 void loggerFlush() {
     if (logFile) logFile.flush();
+    if (jsonlFile) jsonlFile.flush();
 }
 
 #endif // BOARD_T3S3
