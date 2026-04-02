@@ -68,8 +68,8 @@ static const int   RSSI_GUIDED_MAX_BINS  = 8;      // max elevated bins to CAD-c
 
 // ── Frequency Diversity (FHSS Detection) ─────────────────────────────
 static const unsigned long DIVERSITY_WINDOW_MS = 3000;    // 3-second sliding window
-static const int DIVERSITY_WARNING             = 5;       // distinct freqs for WARNING
-static const int DIVERSITY_CRITICAL            = 8;       // distinct freqs for CRITICAL
+static const int DIVERSITY_WARNING             = 3;       // distinct freqs for WARNING (field baseline max=2)
+static const int DIVERSITY_CRITICAL            = 5;       // distinct freqs for CRITICAL
 static const int MAX_DIVERSITY_SLOTS           = 32;      // max tracked distinct frequencies
 
 // ── RSSI Ambient Filter ──────────────────────────────────────────────
