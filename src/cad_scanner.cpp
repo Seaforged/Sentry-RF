@@ -425,18 +425,32 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     }
 
     // ── PHASE 2: Broad CAD scan — all SF values, rotating channels ──────
+    // Pursuit mode: when a drone is detected, focus on active SFs at max coverage
+    bool pursuitMode = (countDiversity(DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
+                       || (result.confirmedCadCount > 0);
+
     struct SFScan {
         uint8_t sf; int chCount; int totalCh; uint32_t* rot;
         float (*fn)(int);
     };
+
+    // In pursuit mode, SF6 gets full 80 channels, SF7 gets 60, others reduced
+    int sf6ch  = pursuitMode ? 80 : CAD_CH_SF6;
+    int sf7ch  = pursuitMode ? 60 : CAD_CH_SF7;
+    int sf8ch  = pursuitMode ? 30 : CAD_CH_SF8;
+    int sf9ch  = pursuitMode ? 4  : CAD_CH_SF9;
+    int sf10ch = pursuitMode ? 1  : CAD_CH_SF10;
+    int sf11ch = pursuitMode ? 1  : CAD_CH_SF11;
+    int sf12ch = pursuitMode ? 1  : CAD_CH_SF12;
+
     SFScan sfScans[] = {
-        { 6,  CAD_CH_SF6,  ELRS_915_CHANNELS, &rotSF6,  elrs915Freq },
-        { 7,  CAD_CH_SF7,  ELRS_915_CHANNELS, &rotSF7,  elrs915Freq },
-        { 8,  CAD_CH_SF8,  ELRS_915_CHANNELS, &rotSF8,  elrs915Freq },
-        { 9,  CAD_CH_SF9,  ELRS_915_CHANNELS, &rotSF9,  elrs915Freq },
-        { 10, CAD_CH_SF10, ELRS_915_CHANNELS, &rotSF10, elrs915Freq },
-        { 11, CAD_CH_SF11, ELRS_868_CHANNELS, &rotSF11, elrs868Freq },
-        { 12, CAD_CH_SF12, ELRS_915_CHANNELS, &rotSF12, elrs915Freq },
+        { 6,  sf6ch,  ELRS_915_CHANNELS, &rotSF6,  elrs915Freq },
+        { 7,  sf7ch,  ELRS_915_CHANNELS, &rotSF7,  elrs915Freq },
+        { 8,  sf8ch,  ELRS_915_CHANNELS, &rotSF8,  elrs915Freq },
+        { 9,  sf9ch,  ELRS_915_CHANNELS, &rotSF9,  elrs915Freq },
+        { 10, sf10ch, ELRS_915_CHANNELS, &rotSF10, elrs915Freq },
+        { 11, sf11ch, ELRS_868_CHANNELS, &rotSF11, elrs868Freq },
+        { 12, sf12ch, ELRS_915_CHANNELS, &rotSF12, elrs915Freq },
     };
 
     for (int s = 0; s < 7; s++) {
@@ -451,6 +465,8 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                       cadParams[idx].detPeak, cadParams[idx].detMin);
 #endif
 
+        // Sorted monotonic sweep: channels are scanned in ascending frequency
+        // order to minimize PLL settling time between hops.
         int stride = sc.totalCh / sc.chCount;
         if (stride < 1) stride = 1;
         int offset = (*sc.rot) % stride;

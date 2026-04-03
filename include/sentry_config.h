@@ -37,13 +37,14 @@ static const int   TAP_EXPIRE_MISSES     = 3;       // consecutive misses to dea
 static const float TAP_FREQ_TOL          = 0.2f;    // MHz — +/-200 kHz to match existing tap
 
 // ── CAD Channel Allocation ────────────────────────────────────────────
-static const int CAD_CH_SF6  = 60;   // ELRS 200Hz — highest priority
-static const int CAD_CH_SF7  = 30;   // ELRS 150Hz
-static const int CAD_CH_SF8  = 15;   // ELRS 100Hz
-static const int CAD_CH_SF9  = 8;
+static const int CAD_CH_SF6  = 60;   // ELRS 200Hz — covers 80ch in 1.3 cycles
+static const int CAD_CH_SF7  = 40;   // ELRS 150Hz — covers 80ch in 2 cycles
+static const int CAD_CH_SF8  = 20;   // ELRS 100Hz
+static const int CAD_CH_SF9  = 10;
 static const int CAD_CH_SF10 = 4;
 static const int CAD_CH_SF11 = 2;
 static const int CAD_CH_SF12 = 2;
+// Total: ~138 normal, up to 160 in pursuit mode
 static const int FSK_CH      = 4;
 
 // ── ELRS/Crossfire Channel Plans ──────────────────────────────────────
