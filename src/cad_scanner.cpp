@@ -437,18 +437,16 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
         }
     }
 
-    // ── PHASE 3: FSK preamble detection (Crossfire/FrSky) ────────────────
-    // DISABLED: FSK mode switch corrupts LoRa CAD state on next cycle,
-    // causing inflated diversity. Needs investigation of RadioLib internal
-    // state after FSK→LoRa transitions.
-#if 0
-    // Switch to FSK mode, re-check existing FSK taps, then scan new channels.
-    {
-        radio.standby();
-        uint8_t fskType = 0x00;
-        radioMod.SPIwriteStream(0x8A, &fskType, 1);
+    // ── PHASE 4: Switch back to FSK for next RSSI sweep ────────────────
+    switchToFSK(radio);
+    radio.setRxBoostedGainMode(true);
 
-        // Configure for Crossfire 150 Hz: 85.1 kbps, ~25 kHz deviation
+    // ── PHASE 3: FSK Crossfire scan ────────────────────────────────────
+    // Runs AFTER switchToFSK() — radio is already in FSK mode.
+    // This avoids the LoRa→FSK→LoRa sandwich that corrupted RadioLib
+    // internal state. Sequence is now FSK→FSK(Crossfire)→FSK(RSSI).
+    {
+        // Reconfigure for Crossfire 150 Hz: 85.1 kbps, ~25 kHz deviation
         radio.setBitRate(85.1);
         radio.setFrequencyDeviation(25.0);
         radio.setRxBandwidth(117.3);
@@ -485,13 +483,12 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                 else addFskTap(freq);
             }
         }
+
+        // Restore RSSI sweep FSK params
+        radio.setBitRate(4.8);
+        radio.setFrequencyDeviation(5.0);
+        radio.setRxBandwidth(234.3);
     }
-
-#endif
-
-    // ── PHASE 4: Switch back to FSK for next RSSI sweep ────────────────
-    switchToFSK(radio);
-    radio.setRxBoostedGainMode(true);
 
     // ── Warmup: record taps as ambient LoRa sources ──────────────────────
     warmupCycleCount++;
