@@ -90,8 +90,8 @@ static void updateBandEnergy(const float* rssi) {
     // US band: 902-928 MHz = bins 210-340
     updateBandEnergyRegion(rssi, 210, 340,
         bandEnergyHistoryUS, bandEnergyIdxUS, bandEnergySamplesUS, bandEnergyElevatedUS);
-    // EU band: 860-870 MHz = bins 0-50
-    updateBandEnergyRegion(rssi, 0, 50,
+    // EU band: 863-870 MHz = bins 15-50 (EU ISM starts at 863 MHz)
+    updateBandEnergyRegion(rssi, 15, 50,
         bandEnergyHistoryEU, bandEnergyIdxEU, bandEnergySamplesEU, bandEnergyElevatedEU);
     // Combined
     bandEnergyElevated = bandEnergyElevatedUS || bandEnergyElevatedEU;
@@ -530,11 +530,12 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     // Rapid-clear: if ALL detection sources are silent for N consecutive cycles,
     // skip cooldown decay and jump directly to CLEAR. Gives operator fast
     // feedback that the threat has left.
-    // Rapid-clear checks CAD silence only — RSSI persistence decays slowly
-    // (3 sweep cycles × 3 CAD cycles each = 9+ cycles) and would prevent
-    // rapid-clear from ever firing in the useful timeframe.
-    // If diversity is 0, no non-ambient CAD hits in the last 5 seconds — all clear.
-    bool allClean = (score < SCORE_ADVISORY);
+    // Rapid-clear: explicit check that ALL detection sources are silent.
+    // Score-based check was inconsistent (EU RSSI at 5 pts passed, US at 10 didn't).
+    bool allClean = (diversityCountThisCycle == 0)
+                    && (cadDetectionsThisCycle == 0)
+                    && (fskDetectionsThisCycle == 0)
+                    && !bandEnergyElevated;
 
     if (allClean) {
         cleanCycleCount++;
