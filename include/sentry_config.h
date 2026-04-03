@@ -60,7 +60,7 @@ static const float AMBIENT_FREQ_TOLERANCE         = 0.2f;   // +/-MHz match wind
 static const unsigned long AMBIENT_AUTOLEARN_MS   = 60000;  // ms before confirmed tap auto-learned (was 10s)
 
 // ── FSK Detection (Crossfire/FrSky) ──────────────────────────────────
-static const float FSK_DETECT_THRESHOLD_DBM = -50.0f;  // dBm — strict, bench ambient is -60 to -70
+static const float FSK_DETECT_THRESHOLD_DBM = -70.0f;  // dBm — field-appropriate (bench: raise to -50)
 static const int   FSK_DWELL_US             = 2500;    // microseconds per channel dwell
 
 // ── RSSI-Guided CAD ──────────────────────────────────────────────────
@@ -93,6 +93,7 @@ static const int WEIGHT_RSSI_PERSISTENT_EU = 5;    // persistent RSSI in 860-886
 static const int WEIGHT_BAND_ENERGY        = 5;    // band energy elevated
 static const int WEIGHT_GNSS_ANOMALY       = 15;   // GNSS integrity anomaly
 static const int WEIGHT_24GHZ_PERSISTENT   = 10;   // 2.4 GHz persistent (LR1121)
+static const int WEIGHT_REMOTE_ID          = 20;   // WiFi Remote ID detected
 static const int SCORE_ADVISORY            = 8;    // score threshold for ADVISORY
 static const int SCORE_WARNING             = 24;   // score threshold for WARNING (div=3 → 3×8)
 static const int SCORE_CRITICAL            = 40;   // score threshold for CRITICAL (div=5 → 5×8)

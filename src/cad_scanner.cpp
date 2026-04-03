@@ -426,8 +426,14 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
 
     // ── PHASE 2: Broad CAD scan — all SF values, rotating channels ──────
     // Pursuit mode: when a drone is detected, focus on active SFs at max coverage
+    static bool lastPursuitMode = false;
     bool pursuitMode = (countDiversity(DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
                        || (result.confirmedCadCount > 0);
+    if (pursuitMode && !lastPursuitMode)
+        Serial.println("[PURSUIT] Activated — focusing scan on active SFs");
+    else if (!pursuitMode && lastPursuitMode)
+        Serial.println("[PURSUIT] Deactivated — normal scan");
+    lastPursuitMode = pursuitMode;
 
     struct SFScan {
         uint8_t sf; int chCount; int totalCh; uint32_t* rot;
@@ -515,42 +521,45 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     // internal state. Sequence is now FSK→FSK(Crossfire)→FSK(RSSI).
     {
         // Reconfigure for Crossfire 150 Hz: 85.1 kbps, ~25 kHz deviation
-        radio.setBitRate(85.1);
-        radio.setFrequencyDeviation(25.0);
-        radio.setRxBandwidth(117.3);
+        int16_t fskErr = radio.setBitRate(85.1);
+        if (fskErr == RADIOLIB_ERR_NONE) {
+            radio.setFrequencyDeviation(25.0);
+            radio.setRxBandwidth(117.3);
 
-        // Re-check existing FSK taps (hit/miss like Phase 1 does for LoRa)
-        for (int i = 0; i < MAX_TAPS; i++) {
-            if (!tapList[i].active || !tapList[i].isFsk) continue;
-            radio.setFrequency(tapList[i].frequency);
-            radio.startReceive();
-            delayMicroseconds(FSK_DWELL_US);
-            float r = radio.getRSSI(false);
-            if (r > FSK_DETECT_THRESHOLD_DBM) tapHit(&tapList[i]);
-            else tapMiss(&tapList[i]);
-        }
+            // Re-check existing FSK taps
+            for (int i = 0; i < MAX_TAPS; i++) {
+                if (!tapList[i].active || !tapList[i].isFsk) continue;
+                radio.setFrequency(tapList[i].frequency);
+                radio.startReceive();
+                delayMicroseconds(FSK_DWELL_US);
+                float r = radio.getRSSI(false);
+                if (r > FSK_DETECT_THRESHOLD_DBM) tapHit(&tapList[i]);
+                else tapMiss(&tapList[i]);
+            }
 
-        // Scan new Crossfire channels (rotating)
-        int stride = CRSF_CHANNELS / FSK_CH;
-        if (stride < 1) stride = 1;
-        int offset = rotFSK % stride;
-        rotFSK++;
+            // Scan new Crossfire channels (rotating)
+            int stride = CRSF_CHANNELS / FSK_CH;
+            if (stride < 1) stride = 1;
+            int offset = rotFSK % stride;
+            rotFSK++;
 
-        for (int i = 0; i < FSK_CH; i++) {
-            int ch = (offset + i * stride) % CRSF_CHANNELS;
-            float freq = crsfFskFreq(ch);
+            for (int i = 0; i < FSK_CH; i++) {
+                int ch = (offset + i * stride) % CRSF_CHANNELS;
+                float freq = crsfFskFreq(ch);
 
-            radio.setFrequency(freq);
-            radio.startReceive();
-            delayMicroseconds(FSK_DWELL_US);
+                radio.setFrequency(freq);
+                radio.startReceive();
+                delayMicroseconds(FSK_DWELL_US);
 
-            float r = radio.getRSSI(false);
-            if (r > FSK_DETECT_THRESHOLD_DBM) {
-                CadTap* existing = findTap(freq, 0);
-                if (existing) tapHit(existing);
-                else addFskTap(freq);
+                float r = radio.getRSSI(false);
+                if (r > FSK_DETECT_THRESHOLD_DBM) {
+                    CadTap* existing = findTap(freq, 0);
+                    if (existing) tapHit(existing);
+                    else addFskTap(freq);
+                }
             }
         }
+        // else: 85.1 kbps rejected — skip FSK scan, just restore params
 
         // Restore RSSI sweep FSK params + boosted gain
         radio.setBitRate(4.8);

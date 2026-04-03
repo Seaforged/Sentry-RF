@@ -475,6 +475,13 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
                        integrity.cnoAnomalyDetected;
     if (gnssAnomaly) score += WEIGHT_GNSS_ANOMALY;
 
+    // Cross-domain: WiFi Remote ID (set by wifiScanTask via systemState)
+    // Consider RID "active" if detected within the last 10 seconds
+    if (systemState.remoteIdDetected &&
+        (millis() - systemState.remoteIdLastMs) < 10000) {
+        score += WEIGHT_REMOTE_ID;
+    }
+
     lastScore = score;
 
     // Map score to threat level
@@ -610,7 +617,7 @@ void detectionEngineInit() {
     ambientFilterInit();
 }
 
-int detectionEngineGetScore() { return lastScore; }
+int detectionEngineGetScore() { return (lastScore > 100) ? 100 : lastScore; }
 
 void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad, int activeTaps, int diversityCount) {
     cadDetectionsThisCycle = cadCount;

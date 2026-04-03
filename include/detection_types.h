@@ -39,6 +39,9 @@ struct SystemState {
     int             cadConfirmed;
     int             cadTotalTaps;
     int             confidenceScore;
+    // WiFi Remote ID (written by wifiScanTask)
+    bool            remoteIdDetected;
+    unsigned long   remoteIdLastMs;
 };
 
 // Detection event sources
@@ -56,6 +59,7 @@ struct DetectionEvent {
 };
 
 // Globals — created in main.cpp, used by all tasks
+extern SystemState       systemState;
 extern SemaphoreHandle_t stateMutex;
 extern SemaphoreHandle_t serialMutex;
 extern QueueHandle_t     detectionQueue;

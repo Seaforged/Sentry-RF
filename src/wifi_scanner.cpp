@@ -165,6 +165,12 @@ void wifiScanTask(void* param) {
                 event.timestamp = millis();
 
                 if (isRemoteId) {
+                    // Signal to detection engine via shared state
+                    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                        systemState.remoteIdDetected = true;
+                        systemState.remoteIdLastMs = millis();
+                        xSemaphoreGive(stateMutex);
+                    }
                     Serial.printf("[WIFI] RID beacon from %02X:%02X:%02X:%02X:%02X:%02X ch%d RSSI:%d\n",
                                   frame.srcMAC[0], frame.srcMAC[1], frame.srcMAC[2],
                                   frame.srcMAC[3], frame.srcMAC[4], frame.srcMAC[5],
