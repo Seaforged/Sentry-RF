@@ -434,14 +434,34 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
         float (*fn)(int);
     };
 
-    // In pursuit mode, SF6 gets full 80 channels, SF7 gets 60, others reduced
-    int sf6ch  = pursuitMode ? 80 : CAD_CH_SF6;
-    int sf7ch  = pursuitMode ? 60 : CAD_CH_SF7;
-    int sf8ch  = pursuitMode ? 30 : CAD_CH_SF8;
-    int sf9ch  = pursuitMode ? 4  : CAD_CH_SF9;
-    int sf10ch = pursuitMode ? 1  : CAD_CH_SF10;
-    int sf11ch = pursuitMode ? 1  : CAD_CH_SF11;
-    int sf12ch = pursuitMode ? 1  : CAD_CH_SF12;
+    // In pursuit mode, SFs WITH active taps get more channels; inactive SFs
+    // get reduced. This prevents losing a drone on SF9 when pursuit fires.
+    auto sfHasActiveTaps = [](uint8_t sf) -> bool {
+        for (int i = 0; i < MAX_TAPS; i++) {
+            if (tapList[i].active && !tapList[i].isFsk && tapList[i].sf == sf)
+                return true;
+        }
+        return false;
+    };
+
+    int sf6ch  = CAD_CH_SF6;
+    int sf7ch  = CAD_CH_SF7;
+    int sf8ch  = CAD_CH_SF8;
+    int sf9ch  = CAD_CH_SF9;
+    int sf10ch = CAD_CH_SF10;
+    int sf11ch = CAD_CH_SF11;
+    int sf12ch = CAD_CH_SF12;
+
+    if (pursuitMode) {
+        // Boost SFs with active taps, reduce only inactive SFs
+        sf6ch  = sfHasActiveTaps(6)  ? 80 : CAD_CH_SF6;
+        sf7ch  = sfHasActiveTaps(7)  ? 60 : CAD_CH_SF7;
+        sf8ch  = sfHasActiveTaps(8)  ? 30 : CAD_CH_SF8;
+        sf9ch  = sfHasActiveTaps(9)  ? CAD_CH_SF9  : 2;
+        sf10ch = sfHasActiveTaps(10) ? CAD_CH_SF10 : 1;
+        sf11ch = sfHasActiveTaps(11) ? CAD_CH_SF11 : 1;
+        sf12ch = sfHasActiveTaps(12) ? CAD_CH_SF12 : 1;
+    }
 
     SFScan sfScans[] = {
         { 6,  sf6ch,  ELRS_915_CHANNELS, &rotSF6,  elrs915Freq },
@@ -488,7 +508,6 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
 
     // ── PHASE 4: Switch back to FSK for next RSSI sweep ────────────────
     switchToFSK(radio);
-    radio.setRxBoostedGainMode(true);
 
     // ── PHASE 3: FSK Crossfire scan ────────────────────────────────────
     // Runs AFTER switchToFSK() — radio is already in FSK mode.
@@ -533,10 +552,11 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
             }
         }
 
-        // Restore RSSI sweep FSK params
+        // Restore RSSI sweep FSK params + boosted gain
         radio.setBitRate(4.8);
         radio.setFrequencyDeviation(5.0);
         radio.setRxBandwidth(234.3);
+        radio.setRxBoostedGainMode(true);  // after BW restore, not before Phase 3
     }
 
     // ── Warmup: record taps as ambient LoRa sources ──────────────────────
