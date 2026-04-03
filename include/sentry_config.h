@@ -84,6 +84,19 @@ static const uint8_t GPS_MIN_CNO           = 15;    // dB-Hz minimum (6=indoor b
 static const float CNO_STDDEV_SPOOF_THRESH = 2.0f;  // dB-Hz — below this = spoofing suspected
 static const int   MIN_ELEV_FOR_CNO        = 20;    // degrees — exclude low-elevation sats
 
+// ── Confidence Scoring Weights ────────────────────────────────────────
+static const int WEIGHT_DIVERSITY_PER_FREQ = 8;    // per distinct frequency in window
+static const int WEIGHT_CAD_CONFIRMED      = 15;   // per confirmed CAD tap
+static const int WEIGHT_FSK_CONFIRMED      = 12;   // per confirmed FSK tap
+static const int WEIGHT_RSSI_PERSISTENT_US = 10;   // persistent RSSI in 902-928 MHz
+static const int WEIGHT_RSSI_PERSISTENT_EU = 5;    // persistent RSSI in 860-886 MHz
+static const int WEIGHT_BAND_ENERGY        = 5;    // band energy elevated
+static const int WEIGHT_GNSS_ANOMALY       = 15;   // GNSS integrity anomaly
+static const int WEIGHT_24GHZ_PERSISTENT   = 10;   // 2.4 GHz persistent (LR1121)
+static const int SCORE_ADVISORY            = 8;    // score threshold for ADVISORY
+static const int SCORE_WARNING             = 24;   // score threshold for WARNING (div=3 → 3×8)
+static const int SCORE_CRITICAL            = 40;   // score threshold for CRITICAL (div=5 → 5×8)
+
 // ── Buzzer / Alert ────────────────────────────────────────────────────
 static const unsigned long MUTE_DURATION_MS  = 300000; // 5 minutes
 static const unsigned long REMINDER_INTERVAL = 30000;  // 30 seconds
