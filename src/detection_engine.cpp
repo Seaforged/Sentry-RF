@@ -49,39 +49,52 @@ static int diversityCountThisCycle = 0;
 // go, but the band average rises measurably.
 
 // BAND_ENERGY_HISTORY, BAND_ENERGY_THRESH_DB from sentry_config.h
-static float bandEnergyHistory[BAND_ENERGY_HISTORY];
-static int bandEnergyIdx = 0;
-static int bandEnergySamples = 0;
+
+// US band 902-928 MHz
+static float bandEnergyHistoryUS[BAND_ENERGY_HISTORY];
+static int bandEnergyIdxUS = 0;
+static int bandEnergySamplesUS = 0;
+static bool bandEnergyElevatedUS = false;
+
+// EU band 860-870 MHz
+static float bandEnergyHistoryEU[BAND_ENERGY_HISTORY];
+static int bandEnergyIdxEU = 0;
+static int bandEnergySamplesEU = 0;
+static bool bandEnergyElevatedEU = false;
+
+// Combined flag
 static bool bandEnergyElevated = false;
 
-static void updateBandEnergy(const float* rssi) {
-    // Compute average RSSI across 902-928 MHz (bins 210-340)
-    static const int US_START_BIN = 210;
-    static const int US_END_BIN = 340;
+static void updateBandEnergyRegion(const float* rssi, int startBin, int endBin,
+                                    float* history, int& idx, int& samples, bool& elevated) {
     float sum = 0;
-    for (int i = US_START_BIN; i < US_END_BIN; i++) {
-        sum += rssi[i];
-    }
-    float currentAvg = sum / (US_END_BIN - US_START_BIN);
+    for (int i = startBin; i < endBin; i++) sum += rssi[i];
+    float currentAvg = sum / (endBin - startBin);
 
-    // Compute rolling baseline from history
-    float baseline = currentAvg;  // fallback if no history yet
-    if (bandEnergySamples > 0) {
+    float baseline = currentAvg;
+    if (samples > 0) {
         float histSum = 0;
-        int count = (bandEnergySamples < BAND_ENERGY_HISTORY) ? bandEnergySamples : BAND_ENERGY_HISTORY;
-        for (int i = 0; i < count; i++) {
-            histSum += bandEnergyHistory[i];
-        }
+        int count = (samples < BAND_ENERGY_HISTORY) ? samples : BAND_ENERGY_HISTORY;
+        for (int i = 0; i < count; i++) histSum += history[i];
         baseline = histSum / count;
     }
 
-    // Store current value in circular buffer
-    bandEnergyHistory[bandEnergyIdx] = currentAvg;
-    bandEnergyIdx = (bandEnergyIdx + 1) % BAND_ENERGY_HISTORY;
-    if (bandEnergySamples < BAND_ENERGY_HISTORY) bandEnergySamples++;
+    history[idx] = currentAvg;
+    idx = (idx + 1) % BAND_ENERGY_HISTORY;
+    if (samples < BAND_ENERGY_HISTORY) samples++;
 
-    // Flag elevated if current average exceeds rolling baseline by threshold
-    bandEnergyElevated = (bandEnergySamples >= 3) && (currentAvg > baseline + BAND_ENERGY_THRESH_DB);
+    elevated = (samples >= 3) && (currentAvg > baseline + BAND_ENERGY_THRESH_DB);
+}
+
+static void updateBandEnergy(const float* rssi) {
+    // US band: 902-928 MHz = bins 210-340
+    updateBandEnergyRegion(rssi, 210, 340,
+        bandEnergyHistoryUS, bandEnergyIdxUS, bandEnergySamplesUS, bandEnergyElevatedUS);
+    // EU band: 860-870 MHz = bins 0-50
+    updateBandEnergyRegion(rssi, 0, 50,
+        bandEnergyHistoryEU, bandEnergyIdxEU, bandEnergySamplesEU, bandEnergyElevatedEU);
+    // Combined
+    bandEnergyElevated = bandEnergyElevatedUS || bandEnergyElevatedEU;
 }
 
 // ── Threat state machine ────────────────────────────────────────────────────
@@ -458,10 +471,11 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     // MEDIUM: moderate FHSS pattern (diversity alone drives WARNING)
     bool mediumConfidence = (diversity >= DIVERSITY_WARNING);
 
-    // LOW: any diversity OR RSSI persistence OR 2.4 GHz
+    // LOW: any diversity OR RSSI persistence OR 2.4 GHz OR band energy elevated
     bool lowConfidence = (diversity >= 1)
                          || rssiPersistentUS
-                         || (persistent24GHz >= 1);
+                         || (persistent24GHz >= 1)
+                         || bandEnergyElevated;
 
     ThreatLevel desired = THREAT_CLEAR;
 
@@ -497,9 +511,13 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
         for (int t = 0; t < MAX_TRACKED; t++) { tracked[t].active = false; }
         for (int t = 0; t < MAX_TRACKED; t++) { tracked24[t].active = false; }
         for (int i = 0; i < MAX_PROTO_TRACKED; i++) { protoTracked[i].active = false; }
-        memset(bandEnergyHistory, 0, sizeof(bandEnergyHistory));
-        bandEnergyIdx = 0; bandEnergySamples = 0; bandEnergyElevated = false;
+        memset(bandEnergyHistoryUS, 0, sizeof(bandEnergyHistoryUS));
+        memset(bandEnergyHistoryEU, 0, sizeof(bandEnergyHistoryEU));
+        bandEnergyIdxUS = 0; bandEnergySamplesUS = 0; bandEnergyElevatedUS = false;
+        bandEnergyIdxEU = 0; bandEnergySamplesEU = 0; bandEnergyElevatedEU = false;
+        bandEnergyElevated = false;
         cleanCycleCount = 0;
+        clearSinceMs = 0;
         currentThreat = THREAT_CLEAR;
         desired = THREAT_CLEAR;
         lastThreatEventMs = millis();
@@ -595,10 +613,12 @@ void detectionEngineInit() {
     strongPendingCadThisCycle = 0;
     totalActiveTapsThisCycle = 0;
     diversityCountThisCycle = 0;
-    memset(bandEnergyHistory, 0, sizeof(bandEnergyHistory));
-    bandEnergyIdx = 0;
-    bandEnergySamples = 0;
+    memset(bandEnergyHistoryUS, 0, sizeof(bandEnergyHistoryUS));
+    memset(bandEnergyHistoryEU, 0, sizeof(bandEnergyHistoryEU));
+    bandEnergyIdxUS = 0; bandEnergySamplesUS = 0; bandEnergyElevatedUS = false;
+    bandEnergyIdxEU = 0; bandEnergySamplesEU = 0; bandEnergyElevatedEU = false;
     bandEnergyElevated = false;
+    clearSinceMs = 0;
     currentThreat = THREAT_CLEAR;
     lastThreatEventMs = 0;
     ambientFilterInit();
