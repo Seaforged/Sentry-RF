@@ -436,66 +436,52 @@ static void emitFskEvent(float freq, uint8_t severity) {
     xQueueSend(detectionQueue, &event, 0);
 }
 
+static int lastScore = 0;  // exposed for serial output
+
 static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
-    // ── Frequency-diversity threat assessment ──────────────────────────
-    //
-    // The FHSS discriminator: count DISTINCT frequencies with CAD hits
-    // in a 5-second window. Drones hit many frequencies (5-10); ambient
-    // infrastructure hits 1-3 fixed frequencies. The SPREAD is the signal.
+    // ── Weighted confidence scoring ──────────────────────────────────
+    // Each detection source contributes a configurable weight.
+    // Score thresholds map to threat levels.
+    // Weights calibrated to match previous boolean logic behavior.
+    int score = 0;
 
-    // RSSI persistence (backup path for long-range / weak-signal drones)
-    int freqSubGHz  = countPersistentDrone();
-    int freqUS      = countPersistentDroneUS();
-    int freq24GHz   = countPersistentDrone24();
+    // Primary: frequency diversity (FHSS discriminator)
+    int diversity = diversityCountThisCycle;
+    score += diversity * WEIGHT_DIVERSITY_PER_FREQ;
+
+    // Primary: confirmed CAD/FSK taps
+    score += cadDetectionsThisCycle * WEIGHT_CAD_CONFIRMED;
+    score += fskDetectionsThisCycle * WEIGHT_FSK_CONFIRMED;
+
+    // Supporting: RSSI persistence
+    int freqUS = countPersistentDroneUS();
+    int protoUS = countPersistentProtocolUS();
+    if (freqUS >= 1 || protoUS >= 1) score += WEIGHT_RSSI_PERSISTENT_US;
+
+    int freqSubGHz = countPersistentDrone();
     int protoSubGHz = countPersistentProtocol(false);
-    int proto24GHz  = countPersistentProtocol(true);
-    int persistent24GHz = (proto24GHz > freq24GHz) ? proto24GHz : freq24GHz;
+    if (freqSubGHz >= 1 || protoSubGHz >= 1) score += WEIGHT_RSSI_PERSISTENT_EU;
 
+    // Supporting: band energy
+    if (bandEnergyElevated) score += WEIGHT_BAND_ENERGY;
+
+    // Supporting: 2.4 GHz (LR1121)
+    int proto24GHz = countPersistentProtocol(true);
+    int freq24GHz = countPersistentDrone24();
+    if (proto24GHz >= 1 || freq24GHz >= 1) score += WEIGHT_24GHZ_PERSISTENT;
+
+    // Cross-domain: GNSS anomaly
     bool gnssAnomaly = integrity.jammingDetected || integrity.spoofingDetected ||
                        integrity.cnoAnomalyDetected;
+    if (gnssAnomaly) score += WEIGHT_GNSS_ANOMALY;
 
-    int protoUS = countPersistentProtocolUS();
-    bool rssiPersistentUS = (freqUS >= 1) || (protoUS >= 1);
+    lastScore = score;
 
-    // Frequency diversity: the primary FHSS discriminator
-    int diversity = diversityCountThisCycle;
-
-    // Confirmed CAD taps (consecutive-hit path still works independently)
-    bool confirmedCad = (cadDetectionsThisCycle > 0) || (fskDetectionsThisCycle > 0);
-
-    // HIGH: strong FHSS pattern OR confirmed consecutive taps
-    bool highConfidence = (diversity >= DIVERSITY_CRITICAL)
-                          || (diversity >= DIVERSITY_WARNING && rssiPersistentUS)
-                          || (confirmedCad && cadDetectionsThisCycle >= 2);
-
-    // MEDIUM: moderate FHSS pattern (diversity alone drives WARNING)
-    bool mediumConfidence = (diversity >= DIVERSITY_WARNING);
-
-    // LOW: any diversity OR RSSI persistence OR 2.4 GHz OR band energy elevated
-    bool lowConfidence = (diversity >= 1)
-                         || rssiPersistentUS
-                         || (persistent24GHz >= 1)
-                         || bandEnergyElevated;
-
+    // Map score to threat level
     ThreatLevel desired = THREAT_CLEAR;
-
-    if (highConfidence) {
-        desired = THREAT_CRITICAL;
-    } else if (mediumConfidence) {
-        desired = THREAT_WARNING;
-    } else if (lowConfidence) {
-        desired = THREAT_ADVISORY;
-    } else if (freqSubGHz >= 1 || protoSubGHz >= 1) {
-        desired = THREAT_ADVISORY;
-    }
-
-    // GNSS anomaly escalation
-    if (gnssAnomaly && desired < THREAT_WARNING) {
-        desired = THREAT_WARNING;
-    }
-    if (gnssAnomaly && diversity >= 1 && desired < THREAT_CRITICAL) {
-        desired = THREAT_CRITICAL;
-    }
+    if (score >= SCORE_CRITICAL) desired = THREAT_CRITICAL;
+    else if (score >= SCORE_WARNING) desired = THREAT_WARNING;
+    else if (score >= SCORE_ADVISORY) desired = THREAT_ADVISORY;
 
     // Warmup guard — both RSSI and CAD warmups must complete
     static bool postWarmupReset = false;
@@ -548,8 +534,7 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     // (3 sweep cycles × 3 CAD cycles each = 9+ cycles) and would prevent
     // rapid-clear from ever firing in the useful timeframe.
     // If diversity is 0, no non-ambient CAD hits in the last 5 seconds — all clear.
-    bool allClean = (diversityCountThisCycle == 0)
-                    && (cadDetectionsThisCycle == 0);
+    bool allClean = (score < SCORE_ADVISORY);
 
     if (allClean) {
         cleanCycleCount++;
@@ -577,10 +562,10 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
 
     // Emit events on change
     if (desired != currentThreat) {
-        // CAD/FSK events
-        if (highConfidence) {
+        // CAD/FSK events (emit when score indicates high confidence)
+        if (score >= SCORE_WARNING) {
             if (cadDetectionsThisCycle > 0)
-                emitCadEvent(0, 6, desired);  // freq=0 since multiple channels
+                emitCadEvent(0, 6, desired);
             if (fskDetectionsThisCycle > 0)
                 emitFskEvent(0, desired);
         }
@@ -623,6 +608,8 @@ void detectionEngineInit() {
     lastThreatEventMs = 0;
     ambientFilterInit();
 }
+
+int detectionEngineGetScore() { return lastScore; }
 
 void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad, int activeTaps, int diversityCount) {
     cadDetectionsThisCycle = cadCount;

@@ -18,4 +18,7 @@ ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
                                   const IntegrityStatus& integrity,
                                   const ScanResult24* scan24 = nullptr);
 
+// Get the last computed confidence score (for logging/display)
+int detectionEngineGetScore();
+
 #endif // DETECTION_ENGINE_H

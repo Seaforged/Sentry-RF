@@ -108,12 +108,12 @@ void loggerWrite(const SystemState& state, uint32_t sweepNum) {
 
     // JSONL field test log — one JSON object per line
     if (jsonlFile) {
-        jsonlFile.printf("{\"t\":%lu,\"c\":%u,\"threat\":%d,"
+        jsonlFile.printf("{\"t\":%lu,\"c\":%u,\"threat\":%d,\"score\":%d,"
                          "\"div\":%d,\"conf\":%d,\"taps\":%d,"
                          "\"peak_mhz\":%.1f,\"peak_dbm\":%.1f,"
                          "\"lat\":%.7f,\"lon\":%.7f,\"fix\":%d,\"sv\":%d,"
                          "\"jam\":%d,\"spoof\":%d,\"cno_sd\":%.1f}\n",
-                         ts, sweepNum, (int)state.threatLevel,
+                         ts, sweepNum, (int)state.threatLevel, state.confidenceScore,
                          state.cadDiversity, state.cadConfirmed, state.cadTotalTaps,
                          state.spectrum.peakFreq, state.spectrum.peakRSSI,
                          state.gps.latDeg7 / 1e7, state.gps.lonDeg7 / 1e7,

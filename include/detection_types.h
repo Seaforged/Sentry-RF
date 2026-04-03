@@ -38,6 +38,7 @@ struct SystemState {
     int             cadDiversity;
     int             cadConfirmed;
     int             cadTotalTaps;
+    int             confidenceScore;
 };
 
 // Detection event sources
