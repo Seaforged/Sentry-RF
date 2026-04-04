@@ -60,7 +60,7 @@ static const float AMBIENT_FREQ_TOLERANCE         = 0.2f;   // +/-MHz match wind
 static const unsigned long AMBIENT_AUTOLEARN_MS   = 60000;  // ms before confirmed tap auto-learned (was 10s)
 
 // ── FSK Detection (Crossfire/FrSky) ──────────────────────────────────
-static const float FSK_DETECT_THRESHOLD_DBM = -70.0f;  // dBm — field-appropriate (bench: raise to -50)
+static const float FSK_DETECT_THRESHOLD_DBM = -50.0f;  // dBm — bench safe (field: lower to -70)
 static const int   FSK_DWELL_US             = 2500;    // microseconds per channel dwell
 
 // ── RSSI-Guided CAD ──────────────────────────────────────────────────
