@@ -419,7 +419,7 @@ void setup() {
     delay(300);
 
     Serial.println();
-    Serial.println("========== SENTRY-RF v1.2.0-FIX4 ==========");
+    Serial.printf("========== %s v%s ==========\n", FW_NAME, FW_VERSION);
 
     // Boot counter — tracks resets for stability monitoring
     if (bootCount > 1000) bootCount = 0;

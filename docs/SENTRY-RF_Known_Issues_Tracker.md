@@ -1,5 +1,5 @@
 # SENTRY-RF Known Issues & Unfinished Work Tracker
-## As of April 1, 2026 — Post-Sprint 2C
+## As of April 5, 2026 — Post-Sprint 5/5 + Code Review
 
 This document tracks every identified issue, limitation, and unfinished item. Nothing gets forgotten. Check items off as they're resolved. Reference this before every sprint.
 
@@ -7,22 +7,20 @@ This document tracks every identified issue, limitation, and unfinished item. No
 
 ## CRITICAL — Must Fix Before Field Deployment
 
-### [ ] GPS_MIN_CNO is set to 6 (indoor testing value)
+### [x] GPS_MIN_CNO is set to 6 (indoor testing value) — RESOLVED
 **Impact:** Weak attenuated signals degrade fix quality and integrity monitoring.  
-**Fix:** Raise to 15-20 in `sentry_config.h` before any field or production deployment.  
-**Also:** C/N0 uniformity check should be gated behind `GPS_MIN_CNO >= 15` — produces false positives at CNO=6.  
-**Sprint:** 6A in the phased plan.
+**Fix:** Raised to 15 in `sentry_config.h`.  
+**Resolved:** Pre-field-test (Sprint 6A). Current value: `GPS_MIN_CNO = 15`.
 
-### [ ] FSK Phase 3 disabled (#if 0)
-**Impact:** Crossfire 150 Hz mode and FrSky R9 drones are invisible to primary detection. Only detected via RSSI energy (low confidence, slow).  
-**Root cause:** RadioLib internal state corruption after FSK→LoRa mode transition via SPI opcode 0x8A. RadioLib caches modem params (bitrate, deviation, Rx BW) that become stale after raw SPI packet type switch. Subsequent LoRa `scanChannel()` calls use corrupted internal state, inflating CAD false hits.  
-**Possible fixes:**
-1. After Phase 3, explicitly re-set all LoRa params (SF, BW, CR, syncWord, preamble) via RadioLib API before Phase 1 of the next cycle
-2. Restructure so Phase 3 runs AFTER `switchToFSK()` — FSK→FSK transition avoids the corruption. Phase 3 scans, then switchToFSK restores RSSI sweep params
-3. Investigate RadioLib source to find which cached variables are causing the issue — may be a one-line fix
-4. Use `radio.beginFSK()` for Phase 3 instead of raw SPI — but this was previously proven to cause -707 errors. May work if done carefully with proper standby/reset sequence  
-**Code location:** `src/cad_scanner.cpp` lines ~440-490 (wrapped in `#if 0`)  
-**Test:** JJ 'b' command (band sweep) or 'n' (Crossfire) on COM6.
+### [x] FSK Phase 3 disabled (#if 0) — RESOLVED
+**Impact:** Crossfire 150 Hz mode and FrSky R9 drones were invisible to primary detection.  
+**Fix:** Sprint 1/5 (commit `f4361ea`) moved Phase 3 after `switchToFSK()`. FSK→FSK transition avoids the RadioLib state corruption. Phase 3 now runs after the LoRa→FSK switch, scans Crossfire channels, then restores RSSI sweep params.  
+**Resolved:** April 2, 2026.
+
+### [x] Boot banner version string was hardcoded — RESOLVED
+**Impact:** Serial output showed "v1.2.0-FIX4" instead of the actual firmware version from `version.h`.  
+**Fix:** Replaced hardcoded string in `main.cpp` setup() with `Serial.printf` using `FW_NAME` and `FW_VERSION`.  
+**Resolved:** April 5, 2026.
 
 ### [ ] LED alert system still disabled
 **Impact:** No visual alert for the operator. The device is serial-output-only for threat indication.  
@@ -33,6 +31,11 @@ This document tracks every identified issue, limitation, and unfinished item. No
 ---
 
 ## HIGH — Significant Limitations
+
+### [ ] FSK_DETECT_THRESHOLD_DBM requires manual toggle between bench and field
+**Impact:** -50 dBm is bench-safe but too conservative for field use. -70 dBm is field-appropriate but causes immediate CRITICAL on bench from ambient ISM energy (-60 to -70 dBm on Crossfire frequencies).  
+**Current value:** -50 dBm (bench-safe, set in commit `8160c8b`).  
+**Fix:** Change to -70 dBm in `sentry_config.h` before field deployment. Long-term: add runtime mode switch (BENCH/FIELD) or auto-detect based on ambient energy level.
 
 ### [ ] Bench environment produces 4-7 distinct ambient LoRa frequencies in 3-5 seconds
 **Impact:** Frequency diversity thresholds (WARNING=5, CRITICAL=8) are set conservatively to avoid bench false positives. This may make ELRS detection slower than necessary in clean field environments.  
@@ -54,19 +57,19 @@ This document tracks every identified issue, limitation, and unfinished item. No
 **Impact:** RSSI thresholds tuned in FSK mode may not apply correctly after mode switches.  
 **Status:** Currently the RSSI sweep always runs in FSK mode (correct). But if Phase 3 FSK detection is enabled, the mode switch sequence changes the radio state between sweeps.
 
-### [ ] bandEnergyElevated removed from mediumConfidence
-**Impact:** The band energy trending feature (rolling average of 902-928 MHz RSSI) is computed but no longer feeds into threat escalation. It was causing false WARNING on bench.  
-**Fix:** Re-evaluate in the field. If field noise floor is stable, band energy could be a useful FHSS indicator at a higher threshold.  
-**Code:** `detection_engine.cpp` — `bandEnergyElevated` is computed but not used in `assessThreat()`.
+### [x] bandEnergyElevated removed from mediumConfidence — RESOLVED
+**Impact:** Band energy trending was computed but not used in threat escalation.  
+**Fix:** Sprint 3/5 (commit `be1b007`) re-integrated band energy into confidence scoring at 8 dB threshold with `WEIGHT_BAND_ENERGY = 5`. Also added EU band (863-870 MHz) tracking.  
+**Resolved:** April 3, 2026.
 
 ---
 
 ## MEDIUM — Feature Gaps
 
-### [ ] No buzzer alert system
-**Impact:** No audible alert for the operator. In the field, visual-only alerts on a tiny OLED are inadequate.  
-**Status:** Sprint prompt written (`SENTRY-RF_BUZZER_ALERT_SPRINT_PROMPT.md`). Design complete (edge-triggered, per-source tone patterns, cooldown suppression, ACK/mute gestures). Not implemented.  
-**Sprint:** Phase 3B in the phased plan.
+### [x] No buzzer alert system — RESOLVED
+**Impact:** No audible alert for the operator.  
+**Fix:** Implemented in `buzzer_manager.cpp` and `alert_handler.cpp`. 7 tone patterns (self-test, RF advisory/warning, GNSS warning, Remote ID, critical, all-clear). Non-blocking LEDC PWM. ACK (1s hold) and mute (3s hold) via BOOT button. Auto-unmute after 5 minutes.  
+**Resolved:** Pre-v1.4.0.
 
 ### [ ] No boot self-test
 **Impact:** No way to verify hardware health at power-on. A broken antenna or dead GPS gives no warning.  
@@ -115,8 +118,9 @@ This document tracks every identified issue, limitation, and unfinished item. No
 **Requires:** GPIO 10/21 resistor removal on T3S3  
 **Sprint:** Phase 7.5
 
-### [ ] Confidence scoring system (weighted per-detection-source)
-**Sprint:** Phase 6D — requires field data for weight calibration
+### [x] Confidence scoring system (weighted per-detection-source) — RESOLVED
+**Fix:** Sprint 5/5 (commit `c98b1d7`) replaced boolean threat logic with weighted scoring. Weights in `sentry_config.h`. Thresholds: ADVISORY=8, WARNING=24, CRITICAL=40.  
+**Resolved:** April 3, 2026.
 
 ### [ ] DJI OFDM detection via LR1121 2.4 GHz RSSI
 **Sprint:** Phase 5C — requires LR1121 hardware
@@ -164,5 +168,5 @@ This document tracks every identified issue, limitation, and unfinished item. No
 
 ---
 
-*Last updated: April 1, 2026 — post-Sprint 2C*
+*Last updated: April 5, 2026 — post-Sprint 5/5 + code review*
 *Review this document before every sprint.*
