@@ -73,6 +73,13 @@ static const int DIVERSITY_WARNING             = 3;       // used by pursuit mod
 static const int MAX_DIVERSITY_SLOTS           = 32;      // max tracked distinct frequencies
 // NOTE: Threat level mapping is now via SCORE_* thresholds, not DIVERSITY_*.
 
+// ── AAD: Persistence Gate + Diversity Velocity ───────────────────────
+static const uint8_t PERSISTENCE_MIN_CONSECUTIVE = 2;     // consecutive cycle hits before diversity counts
+static const uint8_t DIVERSITY_VELOCITY_WINDOW   = 3;     // scan cycles for velocity calculation
+static const uint8_t DIVERSITY_VELOCITY_FHSS_MIN = 2;     // min velocity for full FHSS confidence
+static const uint8_t DIVERSITY_VELOCITY_BONUS_MIN = 5;    // min velocity for bonus confidence points
+static const uint8_t DIVERSITY_VELOCITY_BONUS_PTS = 10;   // bonus confidence points for high velocity
+
 // ── RSSI Ambient Filter ──────────────────────────────────────────────
 static const int   AMBIENT_HISTORY_DEPTH   = 10;    // sweeps of history before baseline
 static const float AMBIENT_VARIANCE_THRESH = 5.0f;  // dB^2 max variance for baseline lock

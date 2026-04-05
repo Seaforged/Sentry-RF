@@ -42,6 +42,8 @@ static int fskDetectionsThisCycle = 0;
 static int strongPendingCadThisCycle = 0;
 static int totalActiveTapsThisCycle = 0;
 static int diversityCountThisCycle = 0;
+static int persistentDiversityThisCycle = 0;
+static int diversityVelocityThisCycle = 0;
 
 // ── Band energy trending (902-928 MHz) ──────────────────────────────────
 // Tracks average RSSI across US band to detect aggregate FHSS energy rise.
@@ -446,8 +448,20 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     int score = 0;
 
     // Primary: frequency diversity (FHSS discriminator)
-    int diversity = diversityCountThisCycle;
-    score += diversity * WEIGHT_DIVERSITY_PER_FREQ;
+    // Use PERSISTENT diversity — only frequencies with 2+ consecutive cycle hits
+    int diversity = persistentDiversityThisCycle;
+    int velocity = diversityVelocityThisCycle;
+
+    // Velocity-modulated diversity scoring:
+    // Low velocity = infrastructure slowly accumulating → halve diversity weight
+    // High velocity = FHSS burst → full weight + bonus
+    if (velocity < DIVERSITY_VELOCITY_FHSS_MIN) {
+        score += diversity * (WEIGHT_DIVERSITY_PER_FREQ / 2);
+    } else {
+        score += diversity * WEIGHT_DIVERSITY_PER_FREQ;
+        if (velocity >= DIVERSITY_VELOCITY_BONUS_MIN)
+            score += DIVERSITY_VELOCITY_BONUS_PTS;
+    }
 
     // Primary: confirmed CAD/FSK taps
     score += cadDetectionsThisCycle * WEIGHT_CAD_CONFIRMED;
@@ -606,6 +620,8 @@ void detectionEngineInit() {
     strongPendingCadThisCycle = 0;
     totalActiveTapsThisCycle = 0;
     diversityCountThisCycle = 0;
+    persistentDiversityThisCycle = 0;
+    diversityVelocityThisCycle = 0;
     memset(bandEnergyHistoryUS, 0, sizeof(bandEnergyHistoryUS));
     memset(bandEnergyHistoryEU, 0, sizeof(bandEnergyHistoryEU));
     bandEnergyIdxUS = 0; bandEnergySamplesUS = 0; bandEnergyElevatedUS = false;
@@ -619,12 +635,16 @@ void detectionEngineInit() {
 
 int detectionEngineGetScore() { return (lastScore > 100) ? 100 : lastScore; }
 
-void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad, int activeTaps, int diversityCount) {
+void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad,
+                              int activeTaps, int diversityCount,
+                              int persistentDiversity, int diversityVelocity) {
     cadDetectionsThisCycle = cadCount;
     fskDetectionsThisCycle = fskCount;
     strongPendingCadThisCycle = strongPendingCad;
     totalActiveTapsThisCycle = activeTaps;
     diversityCountThisCycle = diversityCount;
+    persistentDiversityThisCycle = persistentDiversity;
+    diversityVelocityThisCycle = diversityVelocity;
 }
 
 ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,

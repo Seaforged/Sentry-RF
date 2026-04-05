@@ -135,10 +135,16 @@ struct DiversitySlot {
     float frequency;
     uint8_t sf;
     unsigned long lastHitMs;
+    uint8_t consecutiveHits;  // consecutive scan cycles with a hit
+    bool hitThisCycle;        // marked during scan, cleared at cycle start
     bool active;
 };
 
 static DiversitySlot diversitySlots[MAX_DIVERSITY_SLOTS];
+
+// Diversity velocity: track how many slots became persistent (hit==2) per cycle
+static int velocityHistory[DIVERSITY_VELOCITY_WINDOW];
+static int velocityIdx = 0;
 
 static void recordDiversityHit(float freq, uint8_t sf) {
     unsigned long now = millis();
@@ -149,6 +155,7 @@ static void recordDiversityHit(float freq, uint8_t sf) {
             diversitySlots[i].sf == sf &&
             fabsf(diversitySlots[i].frequency - freq) <= TAP_FREQ_TOL) {
             diversitySlots[i].lastHitMs = now;
+            diversitySlots[i].hitThisCycle = true;
             return;  // Same frequency — no new diversity
         }
     }
@@ -170,7 +177,34 @@ static void recordDiversityHit(float freq, uint8_t sf) {
     diversitySlots[bestSlot].frequency = freq;
     diversitySlots[bestSlot].sf = sf;
     diversitySlots[bestSlot].lastHitMs = now;
+    diversitySlots[bestSlot].consecutiveHits = 0;  // first hit, will become 1 at cycle end
+    diversitySlots[bestSlot].hitThisCycle = true;
     diversitySlots[bestSlot].active = true;
+}
+
+// Call at the START of each scan cycle to update persistence counters
+// from the previous cycle's hits, then clear hitThisCycle flags.
+static void diversityCycleUpdate() {
+    int newlyPersistent = 0;
+
+    for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
+        if (!diversitySlots[i].active) continue;
+
+        if (diversitySlots[i].hitThisCycle) {
+            diversitySlots[i].consecutiveHits++;
+            // Track slots that just crossed the persistence threshold
+            if (diversitySlots[i].consecutiveHits == PERSISTENCE_MIN_CONSECUTIVE)
+                newlyPersistent++;
+            diversitySlots[i].hitThisCycle = false;
+        } else {
+            // No hit this cycle — reset persistence
+            diversitySlots[i].consecutiveHits = 0;
+        }
+    }
+
+    // Record velocity for this cycle
+    velocityHistory[velocityIdx] = newlyPersistent;
+    velocityIdx = (velocityIdx + 1) % DIVERSITY_VELOCITY_WINDOW;
 }
 
 static void pruneExpiredDiversity() {
@@ -179,10 +213,12 @@ static void pruneExpiredDiversity() {
         if (diversitySlots[i].active &&
             (now - diversitySlots[i].lastHitMs) >= DIVERSITY_WINDOW_MS) {
             diversitySlots[i].active = false;
+            diversitySlots[i].consecutiveHits = 0;
         }
     }
 }
 
+// Count ALL active diversity slots (raw, for logging)
 static int countDiversity(unsigned long windowMs) {
     unsigned long now = millis();
     int count = 0;
@@ -195,6 +231,28 @@ static int countDiversity(unsigned long windowMs) {
     return count;
 }
 
+// Count only PERSISTENT diversity slots (consecutiveHits >= threshold)
+static int countPersistentDiversity(unsigned long windowMs) {
+    unsigned long now = millis();
+    int count = 0;
+    for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
+        if (diversitySlots[i].active &&
+            diversitySlots[i].consecutiveHits >= PERSISTENCE_MIN_CONSECUTIVE &&
+            (now - diversitySlots[i].lastHitMs) < windowMs) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// Sum of newly-persistent slots over the velocity window
+static int computeDiversityVelocity() {
+    int sum = 0;
+    for (int i = 0; i < DIVERSITY_VELOCITY_WINDOW; i++)
+        sum += velocityHistory[i];
+    return sum;
+}
+
 // ── Tap list management ─────────────────────────────────────────────────────
 
 bool cadWarmupComplete() {
@@ -203,12 +261,16 @@ bool cadWarmupComplete() {
 
 void resetDiversityTracker() {
     memset(diversitySlots, 0, sizeof(diversitySlots));
+    memset(velocityHistory, 0, sizeof(velocityHistory));
+    velocityIdx = 0;
 }
 
 void cadScannerInit() {
     memset(tapList, 0, sizeof(tapList));
     memset(ambientTaps, 0, sizeof(ambientTaps));
     memset(diversitySlots, 0, sizeof(diversitySlots));
+    memset(velocityHistory, 0, sizeof(velocityHistory));
+    velocityIdx = 0;
     ambientTapCount = 0;
     warmupCycleCount = 0;
     warmupComplete = false;
@@ -343,7 +405,10 @@ CadFskResult cadFskScan(LR1121& radio, uint32_t cycleNum, const ScanResult* rssi
 #else // SX1262 boards
 
 CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi) {
-    CadFskResult result = {0, 0, 0, 0, 0, 0};
+    CadFskResult result = {0, 0, 0, 0, 0, 0, 0, 0};
+
+    // Update persistence counters from previous cycle's hits, then clear flags
+    diversityCycleUpdate();
 
     // Housekeeping: prune expired diversity slots
     pruneExpiredDiversity();
@@ -633,6 +698,8 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
 
     countConfirmed(result.confirmedCadCount, result.confirmedFskCount, result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
     result.diversityCount = countDiversity(DIVERSITY_WINDOW_MS);
+    result.persistentDiversityCount = countPersistentDiversity(DIVERSITY_WINDOW_MS);
+    result.diversityVelocity = computeDiversityVelocity();
 
     return result;
 }

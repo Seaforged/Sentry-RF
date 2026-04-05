@@ -22,12 +22,14 @@ struct CadTap {
 };
 
 struct CadFskResult {
-    int confirmedCadCount;    // CAD taps with 3+ consecutive hits
-    int confirmedFskCount;    // FSK taps with 3+ consecutive hits
-    int strongPendingCad;     // CAD taps with exactly 2 consecutive hits
-    int pendingTaps;          // active taps not yet confirmed
-    int totalActiveTaps;      // all active taps (any hit count)
-    int diversityCount;       // distinct non-ambient frequencies with CAD hits in window
+    int confirmedCadCount;        // CAD taps with 3+ consecutive hits
+    int confirmedFskCount;        // FSK taps with 3+ consecutive hits
+    int strongPendingCad;         // CAD taps with exactly 2 consecutive hits
+    int pendingTaps;              // active taps not yet confirmed
+    int totalActiveTaps;          // all active taps (any hit count)
+    int diversityCount;           // distinct non-ambient frequencies with CAD hits in window
+    int persistentDiversityCount; // diversity slots with consecutiveHits >= PERSISTENCE_MIN_CONSECUTIVE
+    int diversityVelocity;        // new persistent slots in last DIVERSITY_VELOCITY_WINDOW cycles
 };
 
 // ── Public API ──────────────────────────────────────────────────────────────
