@@ -1,5 +1,5 @@
 # SENTRY-RF Known Issues & Unfinished Work Tracker
-## As of April 5, 2026 — Post-Sprint 5/5 + Code Review
+## As of April 5, 2026 — Post-AAD Sprint 1 (v1.5.0)
 
 This document tracks every identified issue, limitation, and unfinished item. Nothing gets forgotten. Check items off as they're resolved. Reference this before every sprint.
 
@@ -22,6 +22,12 @@ This document tracks every identified issue, limitation, and unfinished item. No
 **Fix:** Replaced hardcoded string in `main.cpp` setup() with `Serial.printf` using `FW_NAME` and `FW_VERSION`.  
 **Resolved:** April 5, 2026.
 
+### [x] Bench false WARNING/CRITICAL from ambient LoRa — RESOLVED
+**Impact:** Ambient LoRaWAN/Meshtastic infrastructure on the bench produced 3-5 distinct CAD frequency hits in the diversity window, triggering false WARNING (score=37-45) and CRITICAL (score=100) with no drone present.  
+**Fix:** AAD Sprint 1 — sustained-diversity persistence gate (commits `fb8e6a2` through `99d9639`). Diversity only counts toward scoring when raw diversity stays >= 3 for 3 consecutive scan cycles (~7.5s). LoRaWAN can't sustain this (max sustainedCycles=1 on bench); FHSS drones sustain it for 9+ cycles continuously.  
+**Bench validation:** Baseline holds CLEAR with sustainedCycles max 1, persDiv=0, score=5. ELRS FHSS detection reaches CRITICAL in 6.6s with persDiv=32, score=100.  
+**Resolved:** April 5, 2026 (v1.5.0).
+
 ### [ ] LED alert system still disabled
 **Impact:** No visual alert for the operator. The device is serial-output-only for threat indication.  
 **Root cause:** Originally disabled because ambient ISM traffic caused false CRITICAL. Now that the detection engine is redesigned, LED should be re-evaluated.  
@@ -37,10 +43,11 @@ This document tracks every identified issue, limitation, and unfinished item. No
 **Current value:** -50 dBm (bench-safe, set in commit `8160c8b`).  
 **Fix:** Change to -70 dBm in `sentry_config.h` before field deployment. Long-term: add runtime mode switch (BENCH/FIELD) or auto-detect based on ambient energy level.
 
-### [ ] Bench environment produces 4-7 distinct ambient LoRa frequencies in 3-5 seconds
-**Impact:** Frequency diversity thresholds (WARNING=5, CRITICAL=8) are set conservatively to avoid bench false positives. This may make ELRS detection slower than necessary in clean field environments.  
-**Fix:** Field test will determine if thresholds can be lowered. If field baseline diversity is 0-2, drop to WARNING=3, CRITICAL=5.  
-**Data needed:** Field baseline diversity measurements at multiple locations.
+### [x] Bench environment produces 4-7 distinct ambient LoRa frequencies in 3-5 seconds — MITIGATED
+**Impact:** Ambient LoRa diversity overlapped with drone FHSS diversity thresholds, causing false escalation.  
+**Mitigation:** AAD sustained-diversity persistence gate (v1.5.0). Raw diversity still reaches 3-5 from ambient, but `persDiv` stays at 0 because ambient sources don't sustain high diversity across 3 consecutive scan cycles. Drone FHSS sustains it for 9+ cycles. The raw `div` metric is now informational only — scoring uses `persDiv`.  
+**Remaining risk:** Dense urban environments with many simultaneous LoRaWAN gateways could theoretically sustain div>=3 for 3+ cycles. Not yet tested in urban deployment. AAD Sprint 2 (continuous ambient catalog) would further mitigate this.  
+**Mitigated:** April 5, 2026.
 
 ### [ ] Long-running bench degradation
 **Impact:** After 60-90+ seconds of runtime on a LoRa-rich bench, ambient state accumulates enough to cause false WARNING/CRITICAL. Post-warmup reset only fires once.  
@@ -168,5 +175,5 @@ This document tracks every identified issue, limitation, and unfinished item. No
 
 ---
 
-*Last updated: April 5, 2026 — post-Sprint 5/5 + code review*
+*Last updated: April 5, 2026 — post-AAD Sprint 1 (v1.5.0)*
 *Review this document before every sprint.*
