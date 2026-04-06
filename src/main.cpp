@@ -434,7 +434,7 @@ void setup() {
     printBanner();
 
     pinMode(PIN_LED, OUTPUT);
-    digitalWrite(PIN_LED, LOW);  // LED off — disabled until field-tested thresholds
+    digitalWrite(PIN_LED, LOW);  // LED starts off — alert task takes over after boot
     pinMode(PIN_BOOT, INPUT);  // External pull-up on GPIO 0 — no INPUT_PULLUP needed
 
     // Hardware init — splash stays on screen during entire init sequence
