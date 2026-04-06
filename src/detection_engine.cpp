@@ -464,8 +464,15 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     }
 
     // Primary: confirmed CAD/FSK taps
-    score += cadDetectionsThisCycle * WEIGHT_CAD_CONFIRMED;
-    score += fskDetectionsThisCycle * WEIGHT_FSK_CONFIRMED;
+    // Halve weight without sustained diversity — ambient gateways produce conf
+    // without FHSS pattern; real drones always produce both simultaneously
+    if (persistentDiversityThisCycle > 0) {
+        score += cadDetectionsThisCycle * WEIGHT_CAD_CONFIRMED;
+        score += fskDetectionsThisCycle * WEIGHT_FSK_CONFIRMED;
+    } else {
+        score += cadDetectionsThisCycle * (WEIGHT_CAD_CONFIRMED / 2);
+        score += fskDetectionsThisCycle * (WEIGHT_FSK_CONFIRMED / 2);
+    }
 
     // Fast-detect: high PERSISTENT diversity + confirmed tap = unmistakable drone
     // Uses persistent diversity (not raw) to prevent ambient LoRa from triggering
