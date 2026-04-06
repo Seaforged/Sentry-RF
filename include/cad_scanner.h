@@ -28,8 +28,9 @@ struct CadFskResult {
     int pendingTaps;              // active taps not yet confirmed
     int totalActiveTaps;          // all active taps (any hit count)
     int diversityCount;           // distinct non-ambient frequencies with CAD hits in window
-    int persistentDiversityCount; // diversity slots with consecutiveHits >= PERSISTENCE_MIN_CONSECUTIVE
-    int diversityVelocity;        // new persistent slots in last DIVERSITY_VELOCITY_WINDOW cycles
+    int persistentDiversityCount; // raw diversity when sustained >= threshold, else 0
+    int diversityVelocity;        // diversity threshold crossings in last VELOCITY_WINDOW cycles
+    int sustainedCycles;          // consecutive cycles with raw diversity >= PERSISTENCE_MIN_DIVERSITY
 };
 
 // ── Public API ──────────────────────────────────────────────────────────────
