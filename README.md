@@ -6,19 +6,19 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![PlatformIO](https://img.shields.io/badge/Build-PlatformIO-orange.svg)
-![Version: v1.5.2](https://img.shields.io/badge/Version-v1.5.2-blue.svg)
+![Version: v1.5.3](https://img.shields.io/badge/Version-v1.5.3-blue.svg)
 ![Field Tested](https://img.shields.io/badge/Field_Tested-637m_at_158mW-brightgreen.svg)
 
 SENTRY-RF is a pocket-sized passive drone detector ($25-75 BOM) built on ESP32-S3 with SX1262 LoRa radio. It detects drone FHSS control links using LoRa Channel Activity Detection, identifies drones broadcasting WiFi Remote ID, and monitors GNSS integrity for jamming and spoofing attacks.
 
-**v1.5.2 bench-validated performance:**
+**v1.5.3 bench-validated performance:**
 
 | Metric | Result |
 |--------|--------|
-| Time to WARNING | **5.1 seconds** |
-| Time to CRITICAL | **7.4 seconds** |
-| Return to CLEAR | **10 seconds** |
-| False alarm rate (LoRa-dense bench) | **0%** |
+| Time to WARNING | **6.4 seconds** |
+| Time to CRITICAL | **11.2 seconds** |
+| Return to CLEAR | **11.4 seconds** |
+| False alarm rate (30-min soak, LoRa-dense bench) | **0.00%** |
 | Detection range (158 mW ELRS) | **637 meters** |
 | Detection probability (10 mW, 200m NLOS) | **89%** |
 
@@ -29,7 +29,7 @@ SENTRY-RF is a pocket-sized passive drone detector ($25-75 BOM) built on ESP32-S
 ### Sub-GHz RF Detection (860-930 MHz)
 SENTRY-RF uses the SX1262's hardware LoRa Channel Activity Detection (CAD) to identify drone FHSS control links. CAD detects LoRa chirp modulation at the physics level -- LTE base stations, power line interference, and other non-LoRa signals physically cannot trigger it. The system scans across all spreading factors (SF6-SF12) at BW500, covering every ELRS packet rate from 200 Hz racing to 25 Hz long-range.
 
-**Adaptive Ambient Discrimination (AAD)** separates drone FHSS from infrastructure LoRa (LoRaWAN, Meshtastic, Helium). Drones sustain high frequency diversity every scan cycle; infrastructure produces brief sporadic hits that don't persist. The sustained-diversity persistence gate requires 3 consecutive cycles of high diversity before counting toward the threat score, eliminating false alarms in any LoRa environment.
+**Adaptive Ambient Discrimination (AAD)** separates drone FHSS from infrastructure LoRa (LoRaWAN, Meshtastic, Helium). Drones sustain high frequency diversity every scan cycle; infrastructure produces brief sporadic hits that don't persist. The sustained-diversity persistence gate requires 5 consecutive cycles of high diversity before counting toward the threat score, eliminating false alarms in any LoRa environment.
 
 ### WiFi Remote ID Detection
 Captures ASTM F3411 Remote ID beacons in WiFi promiscuous mode. Detects any compliant drone (DJI, Autel, Parrot, and others) broadcasting location via vendor-specific Information Elements (OUI FA:0B:BC). Also fingerprints drone MAC OUI prefixes for additional identification.
@@ -63,7 +63,7 @@ Every ~2.5 seconds (loRaScanTask, Core 1):
   PHASE 3:   FSK scan — Crossfire 85.1 kbps on rotating channels
   PHASE 4:   RSSI sweep every 3rd cycle (350 bins, 860-930 MHz)
 
-  -> Sustained-diversity persistence gate (3 consecutive high-div cycles)
+  -> Sustained-diversity persistence gate (5 consecutive high-div cycles)
   -> Confidence scoring (weighted multi-source)
   -> Threat level assessment with hysteresis + rapid-clear
 
@@ -151,7 +151,7 @@ pio device monitor -b 115200
 ### Expected Boot Output
 
 ```
-========== SENTRY-RF v1.5.1 ==========
+========== SENTRY-RF v1.5.3 ==========
 [BOOT] Boot #1
 [OLED] OK
 [SCAN] FSK mode ready, 350 bins, 860.0-930.0 MHz
@@ -202,11 +202,11 @@ Full results: [docs/FIELD_TEST_RESULTS_2026-04-01.md](docs/FIELD_TEST_RESULTS_20
 
 ## Project Status
 
-**v1.5.2** -- Zero false positives in 15-minute soak test. All 4 detection modes validated. LED alerts active.
+**v1.5.3** -- Zero false positives in 30-minute soak test. Persistence gate raised to 5 cycles. ELRS CRITICAL in 11.2s. All detection modes validated. LED alerts active.
 
 ### What Works
-- Sub-GHz CAD detection with AAD persistence gate (zero false alarms)
-- ELRS FHSS detection in 5-8 seconds with fast-detect scoring
+- Sub-GHz CAD detection with AAD persistence gate (zero false alarms in 30-min soak)
+- ELRS FHSS detection in 6-11 seconds with confidence scoring
 - Crossfire FSK detection via Phase 3 preamble scanning
 - WiFi Remote ID capture (ASTM F3411)
 - GNSS jamming/spoofing monitoring (u-blox M10)
@@ -215,7 +215,7 @@ Full results: [docs/FIELD_TEST_RESULTS_2026-04-01.md](docs/FIELD_TEST_RESULTS_20
 - 6-screen OLED UI with auto-rotation
 - SD card and SPIFFS data logging (CSV + JSONL)
 - Confidence scoring with weighted multi-source fusion
-- 10-second return to CLEAR after drone departs
+- 11-second return to CLEAR after drone departs
 
 ### Roadmap
 - [ ] LR1121 2.4 GHz hardware validation (DJI OcuSync detection)
@@ -249,7 +249,7 @@ SCORE_WARNING           = 24;    // confidence score for WARNING
 SCORE_CRITICAL          = 40;    // confidence score for CRITICAL
 
 // AAD persistence gate
-PERSISTENCE_MIN_CONSECUTIVE = 3;  // sustained high-diversity cycles required
+PERSISTENCE_MIN_CONSECUTIVE = 5;  // sustained high-diversity cycles required
 PERSISTENCE_MIN_DIVERSITY   = 3;  // raw diversity threshold for "high"
 DIVERSITY_WINDOW_MS         = 3000; // 3-second sliding window
 

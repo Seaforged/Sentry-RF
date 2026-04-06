@@ -130,13 +130,13 @@ PlatformIO automatically downloads all dependencies (RadioLib, SparkFun u-blox G
    pio device monitor -b 115200
    ```
 
-### Expected Boot Output (v1.5.1)
+### Expected Boot Output (v1.5.3)
 
 ```
-========== SENTRY-RF v1.5.1 ==========
+========== SENTRY-RF v1.5.3 ==========
 [BOOT] Boot #1
 ========================
- SENTRY-RF v1.5.1
+ SENTRY-RF v1.5.3
  Build: Apr  6 2026
  Board: LilyGo T3S3
  Mode:  FreeRTOS dual-core
@@ -183,13 +183,13 @@ After warmup, the `[CAD]` line is the primary detection status:
 | `conf` | Confirmed CAD taps (3+ consecutive hits on same frequency) |
 | `taps` | Total active taps in the tap list |
 | `div` | Raw diversity: distinct frequencies with CAD hits in 3s window |
-| `persDiv` | Persistent diversity: `div` when sustained >= 3 cycles, else 0 |
+| `persDiv` | Persistent diversity: `div` when sustained >= 5 cycles, else 0 |
 | `vel` | Diversity velocity: new persistent frequencies per window |
-| `sustainedCycles` | Consecutive cycles with raw div >= 3 |
+| `sustainedCycles` | Consecutive cycles with raw div >= 3 (persDiv activates at 5) |
 | `score` | Weighted confidence score (ADVISORY >= 8, WARNING >= 24, CRITICAL >= 40) |
 
 **Baseline (no drone):** `persDiv=0, sustainedCycles=0, score=5`
-**Drone detected:** `persDiv=25-32, sustainedCycles=3+, score=100`
+**Drone detected:** `persDiv=25-32, sustainedCycles=5+, score=100`
 
 ---
 
@@ -212,8 +212,10 @@ After warmup, the `[CAD]` line is the primary detection status:
 
 ## Project Status
 
-**Current version: v1.5.1** -- AAD detection engine validated, LED alerts active, fast response tuning complete.
+**Current version: v1.5.3** -- AAD persistence gate at 5 cycles, 0.00% false positive rate in 30-min soak, ELRS CRITICAL in 11.2s.
 
 Validated against [JUH-MAK-IN JAMMER](https://github.com/Seaforged/Juh-Mak-In-Jammer) test suite (ELRS FHSS, band sweep, Remote ID).
+
+**Note:** GPS status prints every 5 seconds (rate-limited to prevent serial buffer overflow during long monitoring sessions).
 
 See [SENTRY-RF Known Issues Tracker](SENTRY-RF_Known_Issues_Tracker.md) for current limitations and roadmap.
