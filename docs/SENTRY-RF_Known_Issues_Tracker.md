@@ -1,5 +1,5 @@
 # SENTRY-RF Known Issues & Unfinished Work Tracker
-## As of April 6, 2026 — v1.5.2
+## As of April 6, 2026 — v1.5.3
 
 This document tracks every identified issue, limitation, and unfinished item. Nothing gets forgotten. Check items off as they're resolved. Reference this before every sprint.
 
@@ -34,6 +34,12 @@ This document tracks every identified issue, limitation, and unfinished item. No
 **Validation:** 15-minute soak test: 0.00% false positive rate, 391 cycles, max score=22, zero cycles above WARNING. 4/4 detection modes (ELRS, band sweep, CW, mixed FP) still reach CRITICAL with score=100.  
 **Resolved:** April 6, 2026 (v1.5.2).
 
+### [x] 1-hour soak test false CRITICAL from ambient persistence gate breach — RESOLVED
+**Impact:** 28-minute dual-device soak test (T3S3 + Heltec, no drone) showed T3S3 hitting score=80 (CRITICAL) on 2 cycles. Ambient LoRa sustained div>=3 for 4 consecutive cycles, barely passing the persistence gate (threshold=3). Once persDiv jumped to 5, scoring cascaded: 5x8 diversity + 1x15 conf + 20 fast-detect + 5 band = 80.  
+**Fix:** Raised PERSISTENCE_MIN_CONSECUTIVE from 3 to 5. Max observed ambient sustainedCycles=2 in 30-min soak — margin of 3 cycles. Fast-detect now also requires sustainedCycles > PERSISTENCE_MIN_CONSECUTIVE (6+ cycles). GPS serial output rate-limited from 10ms to 5s to prevent serial buffer overflow during long tests.  
+**Validation:** 30-minute soak: 0.00% false positive rate, 802 cycles, max score=19, persDiv=0 entire test. ELRS detection: CRITICAL in 11.2s (via conf tap pathway, not diversity). Cooldown to CLEAR: 11.4s.  
+**Resolved:** April 6, 2026 (v1.5.3).
+
 ### [x] LED alert system still disabled — RESOLVED
 **Impact:** No visual alert for the operator.  
 **Fix:** Re-enabled in commit `0114cf0` with threat-level blink patterns: CLEAR=off, ADVISORY=slow blink (500ms), WARNING=fast blink (200ms), CRITICAL=solid on. Non-blocking millis() timing. Safe to enable now that AAD persistence gate eliminates false alarms.  
@@ -50,20 +56,21 @@ This document tracks every identified issue, limitation, and unfinished item. No
 
 ### [x] Bench environment produces 4-7 distinct ambient LoRa frequencies in 3-5 seconds — MITIGATED
 **Impact:** Ambient LoRa diversity overlapped with drone FHSS diversity thresholds, causing false escalation.  
-**Mitigation:** AAD sustained-diversity persistence gate (v1.5.0). Raw diversity still reaches 3-5 from ambient, but `persDiv` stays at 0 because ambient sources don't sustain high diversity across 3 consecutive scan cycles. Drone FHSS sustains it for 9+ cycles. The raw `div` metric is now informational only — scoring uses `persDiv`.  
-**Remaining risk:** Dense urban environments with many simultaneous LoRaWAN gateways could theoretically sustain div>=3 for 3+ cycles. Not yet tested in urban deployment. AAD Sprint 2 (continuous ambient catalog) would further mitigate this.  
-**Mitigated:** April 5, 2026.
+**Mitigation:** AAD sustained-diversity persistence gate (v1.5.0, raised to 5 cycles in v1.5.3). Raw diversity still reaches 3-5 from ambient, but `persDiv` stays at 0 because ambient sources don't sustain high diversity across 5 consecutive scan cycles (max observed: 2). Drone FHSS sustains it for 9+ cycles. The raw `div` metric is now informational only — scoring uses `persDiv`.  
+**Remaining risk:** Dense urban environments with many simultaneous LoRaWAN gateways could theoretically sustain div>=3 for 5+ cycles. Not yet tested in urban deployment. AAD Sprint 2 (continuous ambient catalog) would further mitigate this.  
+**Mitigated:** April 5, 2026 (v1.5.0), strengthened April 6, 2026 (v1.5.3).
 
 ### [x] Long-running bench degradation — MITIGATED
 **Impact:** After 60-90+ seconds on a LoRa-rich bench, ambient state accumulated causing false escalation.  
 **Mitigation:** AAD sustained-diversity persistence gate (v1.5.0) prevents ambient diversity from triggering escalation. Tap prune on sustained-diversity drop (commit `66b5501`) aggressively clears confirmed taps when a drone departs, preventing stale state from accumulating across detection cycles. Cooldown reduced from 15s to 5s per level for faster return to CLEAR.  
-**Remaining risk:** Not tested beyond ~2 hours continuous runtime. Very long deployments may still accumulate edge-case state.  
-**Mitigated:** April 6, 2026.
+**Remaining risk:** Not tested beyond 30 minutes continuous runtime with v1.5.3 persistence gate. Very long deployments (8+ hours) and outdoor environments may present different ambient patterns.  
+**Mitigated:** April 6, 2026 (v1.5.3).
 
 ### [ ] ELRS detection time varies significantly (2s to 48s across sprints)
 **Impact:** The operator can't predict how quickly the system will alert.  
 **Root cause:** Detection speed depends on which confidence path triggers first — diversity (fast but threshold-dependent), RSSI persistence (reliable but slow ~9-12s minimum), or confirmed CAD taps (definitive but statistically rare).  
-**Status:** Current clean-boot WARNING time is driven by diversity threshold. If diversity < DIVERSITY_WARNING, falls back to RSSI persistence path (~30s). Field testing will determine realistic expectations.
+**Current timing (v1.5.3):** ADVISORY 2.7s, WARNING 6.4s, CRITICAL 11.2s. Primary path is confirmed CAD taps at half-weight (persDiv=0 until sustained=5). The persistence gate at 5 does not slow detection because the tap pathway alone exceeds CRITICAL threshold.  
+**Status:** Field testing will determine if timing holds with real drone signals at various distances.
 
 ### [ ] RSSI sweep noise floor varies between LoRa and FSK mode
 **Impact:** RSSI thresholds tuned in FSK mode may not apply correctly after mode switches.  
@@ -180,5 +187,5 @@ This document tracks every identified issue, limitation, and unfinished item. No
 
 ---
 
-*Last updated: April 6, 2026 — v1.5.2 (zero false positives, all detection modes validated)*
+*Last updated: April 6, 2026 — v1.5.3 (persistence gate 5, 0.00% FP in 30-min soak, CRITICAL in 11.2s)*
 *Review this document before every sprint.*
