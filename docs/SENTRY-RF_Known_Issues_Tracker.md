@@ -1,5 +1,5 @@
 # SENTRY-RF Known Issues & Unfinished Work Tracker
-## As of April 6, 2026 — v1.5.1
+## As of April 6, 2026 — v1.5.2
 
 This document tracks every identified issue, limitation, and unfinished item. Nothing gets forgotten. Check items off as they're resolved. Reference this before every sprint.
 
@@ -27,6 +27,12 @@ This document tracks every identified issue, limitation, and unfinished item. No
 **Fix:** AAD Sprint 1 — sustained-diversity persistence gate (commits `fb8e6a2` through `99d9639`). Diversity only counts toward scoring when raw diversity stays >= 3 for 3 consecutive scan cycles (~7.5s). LoRaWAN can't sustain this (max sustainedCycles=1 on bench); FHSS drones sustain it for 9+ cycles continuously.  
 **Bench validation:** Baseline holds CLEAR with sustainedCycles max 1, persDiv=0, score=5. ELRS FHSS detection reaches CRITICAL in 6.6s with persDiv=32, score=100.  
 **Resolved:** April 5, 2026 (v1.5.0).
+
+### [x] Soak test false positives from ambient CAD tap confirmation — RESOLVED
+**Impact:** 30-minute soak test (no drone) showed 7.77% false positive rate. Ambient LoRaWAN gateways accumulated confirmed CAD taps (conf=3, score=45+) before being tagged as ambient. Fast-detect bonus triggered on raw diversity (div>=5) instead of persistent diversity.  
+**Fix:** Three changes: (1) Fast-detect now requires persistent diversity, not raw (commit `755edc9`). (2) Ambient auto-learn reduced from 60s to 15s — gateways tagged faster. (3) Confirmed tap weight halved when persistentDiversity==0 — ambient conf=1 scores 7 pts instead of 15, keeping total below WARNING (commit `913ecd8`).  
+**Validation:** 15-minute soak test: 0.00% false positive rate, 391 cycles, max score=22, zero cycles above WARNING. 4/4 detection modes (ELRS, band sweep, CW, mixed FP) still reach CRITICAL with score=100.  
+**Resolved:** April 6, 2026 (v1.5.2).
 
 ### [x] LED alert system still disabled — RESOLVED
 **Impact:** No visual alert for the operator.  
@@ -174,5 +180,5 @@ This document tracks every identified issue, limitation, and unfinished item. No
 
 ---
 
-*Last updated: April 6, 2026 — v1.5.1 (AAD + LED + fast response)*
+*Last updated: April 6, 2026 — v1.5.2 (zero false positives, all detection modes validated)*
 *Review this document before every sprint.*

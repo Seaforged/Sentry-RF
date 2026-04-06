@@ -6,12 +6,12 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![PlatformIO](https://img.shields.io/badge/Build-PlatformIO-orange.svg)
-![Version: v1.5.1](https://img.shields.io/badge/Version-v1.5.1-blue.svg)
+![Version: v1.5.2](https://img.shields.io/badge/Version-v1.5.2-blue.svg)
 ![Field Tested](https://img.shields.io/badge/Field_Tested-637m_at_158mW-brightgreen.svg)
 
 SENTRY-RF is a pocket-sized passive drone detector ($25-75 BOM) built on ESP32-S3 with SX1262 LoRa radio. It detects drone FHSS control links using LoRa Channel Activity Detection, identifies drones broadcasting WiFi Remote ID, and monitors GNSS integrity for jamming and spoofing attacks.
 
-**v1.5.1 bench-validated performance:**
+**v1.5.2 bench-validated performance:**
 
 | Metric | Result |
 |--------|--------|
@@ -202,7 +202,7 @@ Full results: [docs/FIELD_TEST_RESULTS_2026-04-01.md](docs/FIELD_TEST_RESULTS_20
 
 ## Project Status
 
-**v1.5.1** -- Adaptive Ambient Discrimination validated, LED alerts active, fast response tuning complete.
+**v1.5.2** -- Zero false positives in 15-minute soak test. All 4 detection modes validated. LED alerts active.
 
 ### What Works
 - Sub-GHz CAD detection with AAD persistence gate (zero false alarms)
