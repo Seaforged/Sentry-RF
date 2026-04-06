@@ -1,77 +1,114 @@
-![SENTRY-RF Splash Screen](SENTRY-RF%20Logo.png)
+![SENTRY-RF](SENTRY-RF%20Logo.png)
 
 # SENTRY-RF
 
-**Passive drone RF detection + GNSS jamming/spoofing monitor for ESP32-S3**
+**Open-source passive drone RF detector and GNSS integrity monitor for ESP32-S3**
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
-![Platform: ESP32-S3](https://img.shields.io/badge/Platform-ESP32--S3-blue.svg)
-![Version: v1.4.0](https://img.shields.io/badge/Version-v1.4.0-orange.svg)
+![PlatformIO](https://img.shields.io/badge/Build-PlatformIO-orange.svg)
+![Version: v1.5.1](https://img.shields.io/badge/Version-v1.5.1-blue.svg)
 ![Field Tested](https://img.shields.io/badge/Field_Tested-637m_at_158mW-brightgreen.svg)
+
+SENTRY-RF is a pocket-sized passive drone detector ($25-75 BOM) built on ESP32-S3 with SX1262 LoRa radio. It detects drone FHSS control links using LoRa Channel Activity Detection, identifies drones broadcasting WiFi Remote ID, and monitors GNSS integrity for jamming and spoofing attacks.
+
+**v1.5.1 bench-validated performance:**
+
+| Metric | Result |
+|--------|--------|
+| Time to WARNING | **5.1 seconds** |
+| Time to CRITICAL | **7.4 seconds** |
+| Return to CLEAR | **10 seconds** |
+| False alarm rate (LoRa-dense bench) | **0%** |
+| Detection range (158 mW ELRS) | **637 meters** |
+| Detection probability (10 mW, 200m NLOS) | **89%** |
+
+---
 
 ## What It Does
 
-SENTRY-RF is a pocket-sized ($25-75 BOM) passive drone detector that identifies FHSS drone control links by measuring **frequency diversity** -- the number of distinct frequencies producing LoRa CAD hits within a sliding time window. Drones hop across dozens of frequencies per second; infrastructure LoRa uses 1-3 fixed channels. The spread is the signature.
+### Sub-GHz RF Detection (860-930 MHz)
+SENTRY-RF uses the SX1262's hardware LoRa Channel Activity Detection (CAD) to identify drone FHSS control links. CAD detects LoRa chirp modulation at the physics level -- LTE base stations, power line interference, and other non-LoRa signals physically cannot trigger it. The system scans across all spreading factors (SF6-SF12) at BW500, covering every ELRS packet rate from 200 Hz racing to 25 Hz long-range.
 
-- **Frequency Diversity Detection**: Counts distinct CAD-hit frequencies in a 3-second window. Baseline div=0-2, drone div=3-14. Clean separation enables fast, false-alarm-free alerting
-- **CAD-First Scan Pipeline**: 121-channel LoRa CAD scan every ~1 second across SF6-SF12/BW500, with RSSI-guided priority scanning on elevated bins
-- **Field-Validated Performance**: 89% detection probability at 2-200m through metal buildings (10 mW), 637m max detection while driving (158 mW). See [field test results](docs/FIELD_TEST_RESULTS_2026-04-01.md)
-- **Sub-GHz Spectrum Scanning** (860-930 MHz): 350 bins at 200 kHz step, protocol matching across 14 drone protocols
-- **GNSS Integrity Monitoring**: u-blox M10 GPS -- jamming detection, spoofing detection, per-satellite C/N0 uniformity
-- **WiFi Remote ID Detection**: ASTM F3411 vendor-specific IE parsing from any drone
-- **Rapid-Clear**: Threat drops to CLEAR within seconds of the drone leaving (4 clean cycles)
+**Adaptive Ambient Discrimination (AAD)** separates drone FHSS from infrastructure LoRa (LoRaWAN, Meshtastic, Helium). Drones sustain high frequency diversity every scan cycle; infrastructure produces brief sporadic hits that don't persist. The sustained-diversity persistence gate requires 3 consecutive cycles of high diversity before counting toward the threat score, eliminating false alarms in any LoRa environment.
 
-## Field Test Results (April 2026)
+### WiFi Remote ID Detection
+Captures ASTM F3411 Remote ID beacons in WiFi promiscuous mode. Detects any compliant drone (DJI, Autel, Parrot, and others) broadcasting location via vendor-specific Information Elements (OUI FA:0B:BC). Also fingerprints drone MAC OUI prefixes for additional identification.
 
-Tested in rural area against [JUH-MAK-IN JAMMER](https://github.com/Seaforged/Juh-Mak-In-Jammer) ELRS transmitter:
+### GNSS Integrity Monitoring
+Connects to a u-blox M10 GPS module via UBX binary protocol. Monitors jamming indicators (MON-HW), spoofing detection state (NAV-STATUS), and per-satellite C/N0 uniformity (NAV-SAT). A spoofed GNSS constellation shows unnaturally uniform signal strength across all satellites -- real satellites at different ranges and elevations produce varied C/N0 values.
 
-| Test | TX Power | Range | Pd (div>=3) | Max div |
-|------|----------|-------|-------------|---------|
-| Compound walk (NLOS) | 10 mW | 2-200m | **89%** | 9 |
-| Rural road drive | 158 mW | 0-637m | **53%** | 14 |
-| Baseline (no TX) | -- | -- | 0% false | max 2 |
+### Multi-Source Confidence Scoring
+All detection sources feed a weighted confidence score:
+- CAD confirmed taps (15 pts each) -- LoRa modulation verified
+- Frequency diversity (8 pts per persistent frequency) -- FHSS pattern confirmed
+- FSK detection (12 pts) -- Crossfire 150 Hz preamble
+- RSSI persistence (5-10 pts) -- energy on known drone frequencies
+- GNSS anomaly (15 pts) -- jamming or spoofing corroboration
+- WiFi Remote ID (20 pts) -- drone identity confirmed
+- Fast-detect bonus (20 pts) -- high diversity + confirmed CAD in same cycle
 
-**Key finding**: A $25 passive detector reliably detects a 10 mW ELRS drone signal through metal buildings at 200m, and a 158 mW signal at 637m while driving. Zero false alarms in rural environments.
+Score thresholds: ADVISORY >= 8, WARNING >= 24, CRITICAL >= 40.
 
-Full results: [docs/FIELD_TEST_RESULTS_2026-04-01.md](docs/FIELD_TEST_RESULTS_2026-04-01.md)
+---
 
-## Threat Levels
+## Detection Architecture
 
-| Level | Name | Trigger | Typical Time |
-|-------|------|---------|--------------|
-| 0 | **CLEAR** | No drone signals, GNSS healthy | -- |
-| 1 | **ADVISORY** | Any CAD diversity, or RSSI persistence | ~2s |
-| 2 | **WARNING** | 3+ distinct frequencies in 3s window | **~3-5s** |
-| 3 | **CRITICAL** | 5+ distinct frequencies, or WARNING + RSSI + GNSS | ~10-15s |
+```
+Every ~2.5 seconds (loRaScanTask, Core 1):
 
-Includes hysteresis (one step per cycle), 15-second cooldown decay, and rapid-clear (4 consecutive clean cycles = immediate CLEAR).
+  PHASE 1:   Re-check active LoRa taps + adjacent channels
+  PHASE 1.5: RSSI-guided CAD on elevated US-band bins
+  PHASE 2:   Broad CAD scan — SF6-SF12 rotating across 138 channels
+             (up to 160 in pursuit mode when drone detected)
+  PHASE 3:   FSK scan — Crossfire 85.1 kbps on rotating channels
+  PHASE 4:   RSSI sweep every 3rd cycle (350 bins, 860-930 MHz)
+
+  -> Sustained-diversity persistence gate (3 consecutive high-div cycles)
+  -> Confidence scoring (weighted multi-source)
+  -> Threat level assessment with hysteresis + rapid-clear
+
+Concurrently (Core 0):
+  GPS:    u-blox UBX polling, GNSS integrity analysis
+  WiFi:   Promiscuous mode Remote ID capture, channel hopping
+  Alert:  Buzzer patterns + LED blink based on threat level
+  Display: 6-screen OLED UI at 2 Hz
+```
+
+### Protocols Detected
+
+| Protocol | Band | Method | Confidence |
+|----------|------|--------|------------|
+| ELRS 868/915 | 860-928 MHz | CAD (LoRa SF6-SF12) | HIGH |
+| TBS Crossfire LoRa | 860-928 MHz | CAD (LoRa SF6/SF12) | HIGH |
+| TBS Crossfire FSK | 902-928 MHz | FSK preamble (85.1 kbps) | HIGH |
+| mLRS | 860-928 MHz | CAD (LoRa SF6-SF11) | HIGH |
+| FrSky R9 | 868/915 MHz | RSSI energy + protocol match | MEDIUM |
+| Any ASTM F3411 drone | 2.4 GHz WiFi | Remote ID beacon parsing | HIGH |
+| DJI / Autel / Parrot | 2.4 GHz WiFi | MAC OUI fingerprint | MEDIUM |
+| ELRS 2.4 GHz | 2400-2500 MHz | RSSI (LR1121 only) | MEDIUM |
+| DJI OcuSync/O3/O4 | 2400-2500 MHz | RSSI (LR1121 only) | MEDIUM |
+
+---
 
 ## Supported Hardware
 
-| Board | PIO Env | Radio | Sub-GHz | 2.4 GHz | Est. BOM |
-|-------|---------|-------|---------|---------|----------|
-| LilyGo T3S3 v1.3 | `t3s3` | SX1262 | 860-930 MHz | WiFi only | ~$25 |
-| Heltec WiFi LoRa 32 V3 | `heltec_v3` | SX1262 | 860-930 MHz | WiFi only | ~$20 |
+| Board | PIO Environment | Radio | Sub-GHz | 2.4 GHz | BOM |
+|-------|----------------|-------|---------|---------|-----|
+| **LilyGo T3S3 V1.3** | `t3s3` | SX1262 | 860-930 MHz | WiFi only | ~$25 |
+| **Heltec WiFi LoRa 32 V3** | `heltec_v3` | SX1262 | 860-930 MHz | WiFi only | ~$20 |
 | LilyGo T3S3 LR1121 | `t3s3_lr1121` | LR1121 | 860-930 MHz | 2400-2500 MHz | ~$35 |
 
-All boards: ESP32-S3, FreeRTOS dual-core, 128x64 OLED, u-blox M10 GPS via UART.
+All boards: ESP32-S3, FreeRTOS dual-core, 128x64 SSD1306 OLED.
 
-## Quick Start
+### Optional Modules
 
-```bash
-git clone https://github.com/Seaforged/Sentry-RF.git
-cd Sentry-RF
-
-pio run -e t3s3              # Build
-pio run -e t3s3 -t upload    # Flash
-pio device monitor -b 115200 # Monitor — watch for div=N in [CAD] lines
-```
-
-## Hardware Requirements
-
-**Required:** One supported ESP32-S3 board + u-blox M10 GPS module
-
-**Optional:** QMC5883L compass (QWIIC/I2C), SD card for logging
+| Module | Purpose | Connection |
+|--------|---------|------------|
+| **u-blox M10 GPS** (MAX-M10S or NEO-M10S) | Position fix + GNSS integrity monitoring | UART (4 wires) |
+| **QMC5883L compass** (e.g., FlyFishRC M10QMC) | Heading + directional bearing to signal | I2C on QWIIC (T3S3 only) |
+| **KY-006 passive piezo buzzer** | Audible threat alerts (7 tone patterns) | GPIO 16 (T3S3) or GPIO 47 (Heltec) |
+| **MicroSD card** (FAT32) | Detection event logging | SD slot (T3S3 only) |
+| **18650 Li-Ion battery** (protected) | Portable operation (6-8 hours) | JST 1.25mm connector |
 
 ### GPS Wiring
 
@@ -82,98 +119,168 @@ pio device monitor -b 115200 # Monitor — watch for div=N in [CAD] lines
 | VCC | 3.3V | 3.3V |
 | GND | GND | GND |
 
-## Detection Architecture
+---
+
+## Quick Start
+
+### Prerequisites
+
+- [PlatformIO](https://platformio.org/) (VS Code extension or CLI)
+- One supported ESP32-S3 board
+- Sub-GHz antenna (868/915 MHz SMA + U.FL pigtail)
+
+### Build and Flash
+
+```bash
+git clone https://github.com/Seaforged/Sentry-RF.git
+cd Sentry-RF
+
+# Build for your board
+pio run -e t3s3          # LilyGo T3S3
+pio run -e heltec_v3     # Heltec WiFi LoRa 32 V3
+
+# Flash
+pio run -e t3s3 --target upload
+
+# Monitor
+pio device monitor -b 115200
+```
+
+**Always connect the antenna before powering on.** Operating without an antenna can damage the SX1262 radio.
+
+### Expected Boot Output
 
 ```
-Every ~1 second:
-  Phase 1:   Re-check active LoRa taps + adjacent channels
-  Phase 1.5: RSSI-guided CAD on elevated US-band bins
-  Phase 2:   Broad 121-channel CAD scan (SF6:60, SF7:30, SF8-12)
-  Phase 3:   FSK scan on Crossfire channels (infrastructure, disabled)
-  -> Frequency diversity count -> Threat assessment -> Rapid-clear check
-
-Every 3rd cycle:
-  Full 350-bin RSSI sweep (860-930 MHz)
+========== SENTRY-RF v1.5.1 ==========
+[BOOT] Boot #1
+[OLED] OK
+[SCAN] FSK mode ready, 350 bins, 860.0-930.0 MHz
+[GPS] Connected at 38400 baud — configuring
+[WIFI] Promiscuous scanner active — channel hopping
+[INIT] FreeRTOS tasks launched — LoRa:Core1, GPS+WiFi:Core0
+[WARMUP] Complete after 20 cycles (51s). 12 ambient taps recorded
+[CAD] cycle=21 conf=0 taps=1 div=1 persDiv=0 vel=0 sustainedCycles=0 score=5
 ```
 
-The **frequency diversity score** (`div=N` in serial output) is the primary FHSS discriminator. Infrastructure LoRa hits 1-3 fixed frequencies regardless of time. A drone's FHSS hits many different frequencies every second. Short 3-second window prevents ambient accumulation.
+After the 50-second ambient warmup, the system holds CLEAR with `persDiv=0` and `score=5`. When a drone appears, `persDiv` and `score` climb rapidly.
 
-## Detection Capabilities
+### First Boot Checklist
 
-### Detects
-- **Sub-GHz LoRa** (CAD): ELRS 868/915, Crossfire LoRa, mLRS -- modulation-confirmed
-- **Sub-GHz FSK** (RSSI): Crossfire 150Hz, FrSky R9 -- energy + frequency match
-- **2.4 GHz** (LR1121 only): ELRS 2.4, DJI OcuSync/O3/O4, FrSky, Spektrum, +10 protocols
-- **WiFi Remote ID**: ASTM F3411 beacons (vendor-agnostic)
-- **GNSS Jamming/Spoofing**: u-blox MON-HW + NAV-STATUS + C/N0 analysis
+- [ ] Splash logo appears on OLED during boot
+- [ ] Dashboard shows threat level, mini spectrum bars, battery %
+- [ ] RF Scan screen shows spectrum with real ambient peaks
+- [ ] GPS screen shows fix status (or "NO GPS" if not connected)
+- [ ] Serial output shows `[WARMUP] Complete` after ~50 seconds
+- [ ] `persDiv=0` and threat stays CLEAR after warmup (no false alarms)
+- [ ] Short button press cycles through 6 screens
+- [ ] Buzzer chirps on boot (self-test pattern)
+- [ ] LED blinks on threat escalation, off at CLEAR
 
-### Cannot Detect
-- DJI on SX1262 boards (requires LR1121 for 2.4 GHz)
-- 5.8 GHz video links
-- Custom military protocols outside 860-930 MHz / 2.4 GHz
+---
 
-## Architecture
+## Field Test Results
 
-```
-Core 0                          Core 1
-+-----------------------+       +---------------------------+
-| gpsReadTask (pri 3)   |       | loRaScanTask (pri 3)      |
-|  u-blox UART + GNSS   |       |  CAD scan (121 ch/cycle)  |
-|  Compass heading      |       |  RSSI-guided CAD          |
-+-----------------------+       |  Diversity tracking        |
-| wifiScanTask (pri 2)  |       |  Threat assessment        |
-|  Remote ID capture    |       |  Data logging             |
-+-----------------------+       +---------------------------+
-| displayTask (pri 1)   |
-|  6-screen OLED UI     |       All config in sentry_config.h
-+-----------------------+       Centralized tunable constants
-| alertTask (pri 2)     |
-|  Buzzer + LED control |
-+-----------------------+
-```
+Tested April 2026 in rural North Carolina against [JUH-MAK-IN JAMMER](https://github.com/Seaforged/Juh-Mak-In-Jammer) ELRS transmitter (SF6/BW500, 80-channel FHSS, 200 Hz):
+
+| Test | TX Power | Range | Detection Probability | Max Diversity |
+|------|----------|-------|-----------------------|---------------|
+| Compound walk (NLOS, metal buildings) | 10 mW | 2-200m | **89%** | 9 |
+| Rural road (driving) | 158 mW | 0-637m | **53%** | 14 |
+| Baseline (no transmitter) | -- | -- | 0% false alarm | 2 |
+
+The SX1262 has 42+ dB of sensitivity margin at 637m. Detection probability is limited by scan probability (catching FHSS hops), not signal strength.
+
+Full results: [docs/FIELD_TEST_RESULTS_2026-04-01.md](docs/FIELD_TEST_RESULTS_2026-04-01.md)
+
+---
+
+## Companion Test Tool
+
+[**JUH-MAK-IN JAMMER**](https://github.com/Seaforged/Juh-Mak-In-Jammer) is a companion signal simulator for SENTRY-RF validation testing. It runs on the same T3S3 hardware and simulates ELRS FHSS, Crossfire FSK, CW tones, band sweeps, WiFi Remote ID, and drone swarm scenarios. All SENTRY-RF detection capabilities are validated against JJ test modes.
+
+---
+
+## Project Status
+
+**v1.5.1** -- Adaptive Ambient Discrimination validated, LED alerts active, fast response tuning complete.
+
+### What Works
+- Sub-GHz CAD detection with AAD persistence gate (zero false alarms)
+- ELRS FHSS detection in 5-8 seconds with fast-detect scoring
+- Crossfire FSK detection via Phase 3 preamble scanning
+- WiFi Remote ID capture (ASTM F3411)
+- GNSS jamming/spoofing monitoring (u-blox M10)
+- Buzzer alerts with 7 tone patterns (advisory, warning, critical, all-clear, etc.)
+- LED threat indicators (slow blink, fast blink, solid)
+- 6-screen OLED UI with auto-rotation
+- SD card and SPIFFS data logging (CSV + JSONL)
+- Confidence scoring with weighted multi-source fusion
+- 10-second return to CLEAR after drone departs
+
+### Roadmap
+- [ ] LR1121 2.4 GHz hardware validation (DJI OcuSync detection)
+- [ ] AAD Sprint 2: continuous ambient catalog replacing fixed warmup
+- [ ] Extended range testing (1+ km at 500 mW)
+- [ ] Real drone flight testing
+- [ ] Multi-device mesh networking
+- [ ] OLED threat screen with AAD metrics (persDiv, score, sustainedCycles)
+- [x] ~~Adaptive Ambient Discrimination~~ -- v1.5.0
+- [x] ~~LED alert system~~ -- v1.5.1
+- [x] ~~Fast detection response tuning~~ -- v1.5.1
+- [x] ~~Field test validation~~ -- April 2026
+- [x] ~~CAD-first scan pipeline~~ -- v1.4.0
+- [x] ~~Confidence scoring engine~~ -- v1.4.0
+- [x] ~~Buzzer alert system~~ -- v1.4.0
+- [x] ~~GNSS integrity monitoring~~ -- v1.2.1
+- [x] ~~WiFi Remote ID (ASTM F3411)~~ -- v1.2.0
+
+See [docs/](docs/) for architecture documents, sprint history, and the [Known Issues Tracker](docs/SENTRY-RF_Known_Issues_Tracker.md).
+
+---
 
 ## Configuration
 
-All tunable constants in [`include/sentry_config.h`](include/sentry_config.h) -- one file for field calibration:
+All tunable detection constants in [`include/sentry_config.h`](include/sentry_config.h):
 
 ```cpp
-DIVERSITY_WARNING  = 3;   // distinct freqs for WARNING (field: 3, bench: 5)
-DIVERSITY_CRITICAL = 5;   // distinct freqs for CRITICAL (field: 5, bench: 8)
-DIVERSITY_WINDOW_MS = 3000; // 3-second sliding window
-COOLDOWN_MS = 15000;        // 15s per threat level decay
-AMBIENT_WARMUP_MS = 50000;  // 50s boot warmup
+// Detection thresholds
+SCORE_ADVISORY          = 8;     // confidence score for ADVISORY
+SCORE_WARNING           = 24;    // confidence score for WARNING
+SCORE_CRITICAL          = 40;    // confidence score for CRITICAL
+
+// AAD persistence gate
+PERSISTENCE_MIN_CONSECUTIVE = 3;  // sustained high-diversity cycles required
+PERSISTENCE_MIN_DIVERSITY   = 3;  // raw diversity threshold for "high"
+DIVERSITY_WINDOW_MS         = 3000; // 3-second sliding window
+
+// Response timing
+COOLDOWN_MS             = 5000;  // 5s per threat level decay step
+AMBIENT_WARMUP_MS       = 50000; // 50s boot warmup for ambient learning
+
+// Fast-detect (skip persistence for unmistakable signals)
+FAST_DETECT_MIN_DIVERSITY = 5;   // raw diversity for fast path
+FAST_DETECT_MIN_CONF      = 1;   // confirmed CAD taps for fast path
+WEIGHT_FAST_DETECT        = 20;  // bonus score points
 ```
 
-## Data Logging
-
-- **SD card** (T3S3): CSV (`/log_NNNN.csv`) + JSONL (`/field_NNNN.jsonl`) per boot
-- **SPIFFS** (Heltec): CSV (`/log.csv`, rotates at 100KB)
-- **Analysis**: `python tools/analyze_field_test.py field_0001.jsonl`
+---
 
 ## Known Limitations
 
-- **Single-channel scanner**: Checks one frequency at a time -- scan probability limits Pd more than sensitivity
-- **No direction finding**: Omnidirectional antenna, presence detection only
-- **3D printed case**: Attenuates signal ~3 dB -- external antenna connector recommended
-- **Scan probability bottleneck**: 42+ dB margin at 637m but only 53% Pd -- need wideband capture for >90% Pd
+- **Single-channel scanner**: Checks one frequency at a time. Scan probability limits detection more than sensitivity.
+- **No direction finding**: Omnidirectional antenna provides presence detection only. Compass + manual rotation gives rough bearing (~45 deg).
+- **No 5.8 GHz**: Cannot detect analog/digital video links.
+- **No 2.4 GHz RF scanning on SX1262 boards**: DJI OcuSync/O3/O4 requires LR1121 board (WiFi Remote ID still works).
+- **3D printed case**: Attenuates signal ~3 dB. External SMA antenna connector recommended.
 
-## Roadmap
+---
 
-- [ ] External antenna connector for 3D printed case
-- [ ] LR1121 2.4 GHz hardware validation
-- [ ] Extended range testing (1+ km at 500 mW)
-- [ ] Multi-device mesh networking
-- [ ] Real drone flight testing
-- [x] ~~Field test validation~~ -- April 2026 (89% Pd at 200m, 637m max range)
-- [x] ~~Frequency diversity detection engine~~ -- v1.4.0
-- [x] ~~CAD-first scan pipeline~~ -- v1.4.0
-- [x] ~~Ambient warmup filter~~ -- v1.4.0
-- [x] ~~GNSS integrity monitoring~~ -- v1.2.1
-- [x] ~~WiFi Remote ID (ASTM F3411)~~ -- v1.2.0
-- [x] ~~Buzzer alert system~~ -- v1.2.0
+## License
+
+[MIT](LICENSE) -- free to use, modify, and distribute.
 
 ## Contributing
 
-Issues and PRs welcome. MIT license, [Seaforged](https://github.com/Seaforged) organization.
+Issues and PRs welcome. This is a personal open-source project under the [Seaforged](https://github.com/Seaforged) organization.
 
-See [CLAUDE.md](CLAUDE.md) for developer context and [docs/](docs/) for architecture documents.
+Developer context: [CLAUDE.md](CLAUDE.md) | Architecture docs: [docs/](docs/)
