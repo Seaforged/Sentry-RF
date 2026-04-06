@@ -46,11 +46,36 @@ static unsigned long _lastEscalationMs = 0;
 
 // ── LED pattern (non-LEDC, uses digitalWrite) ───────────────
 
+static unsigned long ledLastToggleMs = 0;
+static bool ledState = false;
+
 static void updateLED(ThreatLevel level, bool acknowledged) {
-    // LED disabled until field-tested thresholds prevent ambient ISM
-    // traffic from escalating to WARNING/CRITICAL.
-    // TODO: re-enable with proper drone-only trigger after field testing
-    digitalWrite(PIN_LED, LOW);
+    if (acknowledged || level == THREAT_CLEAR) {
+        digitalWrite(PIN_LED, LOW);
+        ledState = false;
+        return;
+    }
+
+    unsigned long now = millis();
+
+    if (level == THREAT_CRITICAL) {
+        digitalWrite(PIN_LED, HIGH);
+        ledState = true;
+    } else if (level == THREAT_WARNING) {
+        // Fast blink: 200ms on / 200ms off
+        if (now - ledLastToggleMs >= 200) {
+            ledState = !ledState;
+            digitalWrite(PIN_LED, ledState ? HIGH : LOW);
+            ledLastToggleMs = now;
+        }
+    } else if (level == THREAT_ADVISORY) {
+        // Slow blink: 500ms on / 500ms off
+        if (now - ledLastToggleMs >= 500) {
+            ledState = !ledState;
+            digitalWrite(PIN_LED, ledState ? HIGH : LOW);
+            ledLastToggleMs = now;
+        }
+    }
 }
 
 // ── Select tone pattern based on source and severity ────────
