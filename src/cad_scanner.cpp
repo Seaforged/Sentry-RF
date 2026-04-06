@@ -210,6 +210,17 @@ static void diversityCycleUpdate() {
     if (rawDiv >= PERSISTENCE_MIN_DIVERSITY) {
         sustainedDiversityCycles++;
     } else {
+        // Drone departure prune: if we had sustained diversity (drone present)
+        // and it just collapsed, aggressively clear all non-ambient taps.
+        // This prevents confirmed taps from lingering and inflating the score
+        // for 30+ seconds after the drone leaves.
+        if (sustainedDiversityCycles >= PERSISTENCE_MIN_CONSECUTIVE) {
+            for (int i = 0; i < MAX_TAPS; i++) {
+                if (tapList[i].active && !tapList[i].isAmbient) {
+                    tapList[i].active = false;
+                }
+            }
+        }
         sustainedDiversityCycles = 0;
     }
 
