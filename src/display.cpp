@@ -451,18 +451,12 @@ void screenSystem(Adafruit_SSD1306& disp, const SystemState& state, int page) {
     disp.setCursor(0, 42);
     if (alertIsMuted()) {
         unsigned long remain = alertMuteRemainingMs() / 1000;
-        snprintf(buf, sizeof(buf), "Buzzer: MUTED %lus", remain);
+        snprintf(buf, sizeof(buf), "Buz:MUTED %lus", remain);
     } else {
-        snprintf(buf, sizeof(buf), "Buzzer: Armed");
+        snprintf(buf, sizeof(buf), "Buz:Armed Cmp:%s",
+                 state.compass.valid ? "OK" : "--");
     }
     disp.print(buf);
-
-    disp.setCursor(0, 52);
-    if (state.compass.valid) {
-        disp.print("Compass: OK");
-    } else {
-        disp.print("Compass: N/A");
-    }
 
     drawPageDots(disp, page, NUM_SCREENS);
     disp.display();

@@ -14,7 +14,9 @@ static const int NUM_SCREENS = 6;  // +dashboard
 #endif
 
 // RSSI range for bar chart vertical scaling
-static const float DISPLAY_RSSI_MIN = -120.0;
+// LR1121 noise floor is ~-127 dBm (lower than SX1262's ~-110), so -130 ensures
+// even quiet channels show a small bar instead of nothing
+static const float DISPLAY_RSSI_MIN = -130.0;
 static const float DISPLAY_RSSI_MAX = -40.0;
 
 void displayInit(Adafruit_SSD1306& disp);

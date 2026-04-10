@@ -6,12 +6,36 @@
 
 #ifdef BOARD_T3S3_LR1121
 
-int scannerInit(LR1121& radio) {
-    // LR1121 uses GFSK, not FSK — different RadioLib method name, same result
-    int state = radio.beginGFSK(4.8, 5.0, 234.3, 16, 1.8);
+int scannerInit(LR1121_RSSI& radio) {
+    // RF switch table — LR1121 needs DIO5/DIO6 for antenna RX/TX switching
+    static const uint32_t rfswitch_dio_pins[] = {
+        RADIOLIB_LR11X0_DIO5, RADIOLIB_LR11X0_DIO6,
+        RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC
+    };
+    static const Module::RfSwitchMode_t rfswitch_table[] = {
+        { LR11x0::MODE_STBY,  { LOW,  LOW  } },
+        { LR11x0::MODE_RX,    { HIGH, LOW  } },
+        { LR11x0::MODE_TX,    { LOW,  HIGH } },
+        { LR11x0::MODE_TX_HP, { LOW,  HIGH } },
+        { LR11x0::MODE_TX_HF, { LOW,  LOW  } },
+        { LR11x0::MODE_GNSS,  { LOW,  LOW  } },
+        { LR11x0::MODE_WIFI,  { LOW,  LOW  } },
+        END_OF_MODE_TABLE,
+    };
+    radio.setRfSwitchTable(rfswitch_dio_pins, rfswitch_table);
+
+    // LR1121::beginGFSK(freq, br, freqDev, rxBw, power, preambleLength, tcxoVoltage)
+    // 7-arg signature — frequency first, TCXO voltage last (SPI init happens inside)
+    // Max freq deviation 200 kHz (SX1262 allows 234.3)
+    int state = radio.beginGFSK(915.0, 4.8, 50.0, 156.2, 10, 16, LR1121_TCXO_VOLTAGE);
     if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("[SCAN] GFSK init failed: %d\n", state);
         return state;
+    }
+
+    state = radio.setFrequency(SCAN_FREQ_START);
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.printf("[SCAN] Frequency prime failed: %d\n", state);
     }
 
     state = radio.setRxBoostedGainMode(true);
@@ -19,12 +43,12 @@ int scannerInit(LR1121& radio) {
         Serial.printf("[SCAN] Rx boost failed: %d\n", state);
     }
 
-    Serial.printf("[SCAN] GFSK mode ready (LR1121), %d bins, %.1f–%.1f MHz\n",
+    Serial.printf("[SCAN] GFSK mode ready (LR1121), %d bins, %.1f-%.1f MHz\n",
                   SCAN_BIN_COUNT, SCAN_FREQ_START, SCAN_FREQ_END);
     return RADIOLIB_ERR_NONE;
 }
 
-void scannerSweep(LR1121& radio, ScanResult& result) {
+void scannerSweep(LR1121_RSSI& radio, ScanResult& result) {
     unsigned long startTime = millis();
     result.peakRSSI = -200.0;
     result.peakFreq = SCAN_FREQ_START;
@@ -32,10 +56,10 @@ void scannerSweep(LR1121& radio, ScanResult& result) {
     for (int i = 0; i < SCAN_BIN_COUNT; i++) {
         float freq = SCAN_FREQ_START + (i * SCAN_FREQ_STEP);
         radio.setFrequency(freq);
+        radio.startReceive();       // must re-enter RX after each setFrequency
         delayMicroseconds(SCAN_DWELL_US);
 
-        // LR11x0 getRSSI() takes no arguments (always instantaneous)
-        result.rssi[i] = radio.getRSSI();
+        result.rssi[i] = radio.getInstantRSSI();
 
         if (result.rssi[i] > result.peakRSSI) {
             result.peakRSSI = result.rssi[i];
@@ -47,7 +71,7 @@ void scannerSweep(LR1121& radio, ScanResult& result) {
 }
 
 // 2.4 GHz sweep — LR1121 handles band switching transparently via setFrequency()
-void scannerSweep24(LR1121& radio, ScanResult24& result) {
+void scannerSweep24(LR1121_RSSI& radio, ScanResult24& result) {
     unsigned long startTime = millis();
     result.peakRSSI = -200.0;
     result.peakFreq = SCAN_24_START;
@@ -56,9 +80,10 @@ void scannerSweep24(LR1121& radio, ScanResult24& result) {
     for (int i = 0; i < SCAN_24_BIN_COUNT; i++) {
         float freq = SCAN_24_START + (i * SCAN_24_STEP);
         radio.setFrequency(freq);
+        radio.startReceive();
         delayMicroseconds(SCAN_DWELL_US);
 
-        result.rssi[i] = radio.getRSSI();
+        result.rssi[i] = radio.getInstantRSSI();
 
         if (result.rssi[i] > result.peakRSSI) {
             result.peakRSSI = result.rssi[i];
