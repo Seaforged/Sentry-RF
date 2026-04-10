@@ -22,7 +22,7 @@
 SPIClass loraSPI(HSPI);
 Module radioMod(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, loraSPI);
 #ifdef BOARD_T3S3_LR1121
-LR1121 radio(&radioMod);
+LR1121_RSSI radio(&radioMod);
 #else
 SX1262 radio(&radioMod);
 #endif
@@ -46,7 +46,8 @@ static TaskHandle_t hWiFiTask    = nullptr;
 static int initRadioHardware() {
     loraSPI.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
 
-    // Heltec SX1262 needs TCXO set before beginFSK — LR1121 handles it in beginGFSK
+    // SX1262 needs setTCXO() before beginFSK() — its SPI is already live.
+    // LR1121 passes TCXO voltage via beginGFSK() parameter instead.
 #ifndef BOARD_T3S3_LR1121
     if (HAS_TCXO) {
         int tcxoState = radio.setTCXO(1.8);
@@ -428,7 +429,7 @@ static void printStackStats() {
 
 void setup() {
     Serial.begin(115200);
-    delay(300);
+    delay(500);  // USB CDC enumeration time
 
     Serial.println();
     Serial.printf("========== %s v%s ==========\n", FW_NAME, FW_VERSION);
@@ -444,6 +445,11 @@ void setup() {
     digitalWrite(PIN_LED, LOW);  // LED starts off — alert task takes over after boot
     pinMode(PIN_BOOT, INPUT);  // External pull-up on GPIO 0 — no INPUT_PULLUP needed
 
+    // Create FreeRTOS primitives early — avoids mutex crash if setup() returns early
+    stateMutex = xSemaphoreCreateMutex();
+    serialMutex = xSemaphoreCreateMutex();
+    detectionQueue = xQueueCreate(10, sizeof(DetectionEvent));
+
     // Hardware init — splash stays on screen during entire init sequence
     displayInit(oled);
     displayBootSplash(oled);  // Shows logo, stays visible until first screen renders
@@ -451,13 +457,23 @@ void setup() {
     int hwState = initRadioHardware();
     if (hwState != RADIOLIB_ERR_NONE) {
         Serial.printf("[INIT] Radio hardware init failed: %d\n", hwState);
-        return;
+        oled.clearDisplay();
+        oled.setTextSize(1);
+        oled.setCursor(0, 0);
+        oled.printf("RADIO HW FAIL: %d", hwState);
+        oled.display();
+        for (;;) delay(1000);
     }
 
     int scanState = scannerInit(radio);
     if (scanState != RADIOLIB_ERR_NONE) {
         Serial.printf("[INIT] Scanner init failed: %d\n", scanState);
-        return;
+        oled.clearDisplay();
+        oled.setTextSize(1);
+        oled.setCursor(0, 0);
+        oled.printf("SCANNER FAIL: %d", scanState);
+        oled.display();
+        for (;;) delay(1000);
     }
 
     cadScannerInit();
@@ -477,11 +493,6 @@ void setup() {
     if (!compassInit()) {
         Serial.println("[COMPASS] Not detected — continuing without compass");
     }
-
-    // Create FreeRTOS primitives
-    stateMutex = xSemaphoreCreateMutex();
-    serialMutex = xSemaphoreCreateMutex();
-    detectionQueue = xQueueCreate(10, sizeof(DetectionEvent));
 
     // Launch tasks — LoRa on Core 1 (exclusive, uses busy-wait sweep)
     // Display on Core 0 so OLED I2C transfers aren't starved by LoRa sweep

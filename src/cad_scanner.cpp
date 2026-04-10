@@ -319,11 +319,12 @@ static CadTap* findTap(float freq, uint8_t sf) {
     return nullptr;
 }
 
-static CadTap* addTap(float freq, uint8_t sf) {
+static CadTap* addTap(float freq, uint8_t sf, RfBand band = BAND_SUB_GHZ) {
     for (int i = 0; i < MAX_TAPS; i++) {
         if (!tapList[i].active) {
             tapList[i].frequency = freq;
             tapList[i].sf = sf;
+            tapList[i].band = band;
             tapList[i].isFsk = false;
             tapList[i].isAmbient = false;
             tapList[i].consecutiveHits = 1;
@@ -428,8 +429,351 @@ static void switchToFSK(SX1262& radio) {
 
 #ifdef BOARD_T3S3_LR1121
 
-CadFskResult cadFskScan(LR1121& radio, uint32_t cycleNum, const ScanResult* rssi) {
-    CadFskResult result = {0, 0, 0, 0, 0, 0};
+// ── LR1121 mode switching — full begin()/beginGFSK() calls ─────────────────
+// LR1121 RadioLib driver doesn't support raw SPI packet type switching.
+// Must use the derived class begin() with all params each time.
+
+static void switchToLoRa_LR(LR1121_RSSI& radio) {
+    radio.begin(915.0, 500.0, 6, 5,
+                RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE, 10, 8, LR1121_TCXO_VOLTAGE);
+}
+
+static void switchToGFSK_LR(LR1121_RSSI& radio) {
+    radio.beginGFSK(915.0, 4.8, 50.0, 156.2, 10, 16, LR1121_TCXO_VOLTAGE);
+    radio.setFrequency(SCAN_FREQ_START);
+    radio.setRxBoostedGainMode(true);
+}
+
+// 2.4 GHz channel helpers
+static const int ELRS_24_CHANNELS = 40;  // 2400-2480 MHz at 2 MHz steps
+static float elrs24Freq(int ch) { return 2400.0f + (ch * 2.0f); }
+
+// 2.4 GHz CAD channel allocation
+static const int CAD_24_SF6  = 20;
+static const int CAD_24_SF7  = 10;
+static const int CAD_24_SF8  = 5;
+static uint32_t rot24SF6 = 0;
+static uint32_t rot24SF7 = 0;
+static uint32_t rot24SF8 = 0;
+
+CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult* rssi) {
+    CadFskResult result = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+    diversityCycleUpdate();
+    pruneExpiredDiversity();
+
+    // ── Enter LoRa mode for CAD scanning ──────────────────────────────
+    switchToLoRa_LR(radio);
+
+    // ── PHASE 1: Priority re-check active sub-GHz LoRa taps ──────────
+    for (int i = 0; i < MAX_TAPS; i++) {
+        if (!tapList[i].active || tapList[i].isFsk) continue;
+        if (tapList[i].band == BAND_2G4) continue;  // 2.4 GHz taps re-checked in Phase 2b
+        radio.setSpreadingFactor(tapList[i].sf);
+        radio.setFrequency(tapList[i].frequency);
+        if (radio.scanChannel() == RADIOLIB_LORA_DETECTED) {
+            tapHit(&tapList[i]);
+            if (warmupComplete && tapList[i].consecutiveHits >= 2 &&
+                !isWarmupAmbient(tapList[i].frequency, tapList[i].sf))
+                recordDiversityHit(tapList[i].frequency, tapList[i].sf);
+        } else {
+            // Adjacent channel check
+            bool adjHit = false;
+            float spacing = 0.325f;
+            for (float delta : {-spacing, spacing}) {
+                float adjFreq = tapList[i].frequency + delta;
+                if (adjFreq >= 902.0f && adjFreq <= 928.0f) {
+                    radio.setFrequency(adjFreq);
+                    if (radio.scanChannel() == RADIOLIB_LORA_DETECTED) {
+                        tapHit(&tapList[i]);
+                        if (warmupComplete && tapList[i].consecutiveHits >= 2 &&
+                            !isWarmupAmbient(adjFreq, tapList[i].sf))
+                            recordDiversityHit(adjFreq, tapList[i].sf);
+                        adjHit = true;
+                        break;
+                    }
+                }
+            }
+            if (!adjHit) tapMiss(&tapList[i]);
+        }
+    }
+
+    // ── PHASE 1.5: RSSI-guided CAD on elevated US-band bins ──────────
+    if (rssi != nullptr && rssi->sweepTimeMs > 0) {
+        int startBin = (int)((902.0f - SCAN_FREQ_START) / SCAN_FREQ_STEP);
+        int endBin   = (int)((928.0f - SCAN_FREQ_START) / SCAN_FREQ_STEP);
+        if (endBin >= SCAN_BIN_COUNT) endBin = SCAN_BIN_COUNT - 1;
+
+        float nf = -120.0f;
+        for (int step = startBin; step <= endBin; step += 11) {
+            float c = rssi->rssi[step];
+            int below = 0, equal = 0;
+            for (int j = startBin; j <= endBin; j += 3) {
+                if (rssi->rssi[j] < c) below++;
+                else if (rssi->rssi[j] == c) equal++;
+            }
+            int total = (endBin - startBin) / 3 + 1;
+            if (below <= total / 2 && (below + equal) > total / 2) { nf = c; break; }
+        }
+
+        float thresh = nf + RSSI_GUIDED_THRESH_DB;
+        int guidedScans = 0;
+        radio.setSpreadingFactor(6);
+
+        for (int bin = startBin; bin <= endBin && guidedScans < RSSI_GUIDED_MAX_BINS; bin++) {
+            if (rssi->rssi[bin] > thresh) {
+                float freq = SCAN_FREQ_START + (bin * SCAN_FREQ_STEP);
+                radio.setFrequency(freq);
+                if (radio.scanChannel() == RADIOLIB_LORA_DETECTED) {
+                    CadTap* existing = findTap(freq, 6);
+                    if (existing) {
+                        tapHit(existing);
+                        if (warmupComplete && existing->consecutiveHits >= 2 &&
+                            !isWarmupAmbient(freq, 6))
+                            recordDiversityHit(freq, 6);
+                    } else {
+                        addTap(freq, 6, BAND_SUB_GHZ);
+                        // New tap starts at consecutiveHits=1 — no diversity yet
+                    }
+                }
+                guidedScans++;
+            }
+        }
+    }
+
+    // ── PHASE 2a: Broad sub-GHz CAD scan — SF6-SF12 rotating channels ─
+    static bool lastPursuitMode = false;
+    bool pursuitMode = (countDiversity(DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
+                       || (result.confirmedCadCount > 0);
+    if (pursuitMode && !lastPursuitMode)
+        Serial.println("[PURSUIT] Activated");
+    else if (!pursuitMode && lastPursuitMode)
+        Serial.println("[PURSUIT] Deactivated");
+    lastPursuitMode = pursuitMode;
+
+    auto sfHasActiveTaps = [](uint8_t sf) -> bool {
+        for (int i = 0; i < MAX_TAPS; i++) {
+            if (tapList[i].active && !tapList[i].isFsk && tapList[i].sf == sf)
+                return true;
+        }
+        return false;
+    };
+
+    int sf6ch  = pursuitMode && sfHasActiveTaps(6)  ? 80 : CAD_CH_SF6;
+    int sf7ch  = pursuitMode && sfHasActiveTaps(7)  ? 60 : CAD_CH_SF7;
+    int sf8ch  = pursuitMode && sfHasActiveTaps(8)  ? 30 : CAD_CH_SF8;
+    int sf9ch  = pursuitMode && !sfHasActiveTaps(9)  ? 2 : CAD_CH_SF9;
+    int sf10ch = pursuitMode && !sfHasActiveTaps(10) ? 1 : CAD_CH_SF10;
+    int sf11ch = pursuitMode && !sfHasActiveTaps(11) ? 1 : CAD_CH_SF11;
+    int sf12ch = pursuitMode && !sfHasActiveTaps(12) ? 1 : CAD_CH_SF12;
+
+    struct SFScan {
+        uint8_t sf; int chCount; int totalCh; uint32_t* rot;
+        float (*fn)(int);
+    };
+
+    SFScan sfScans[] = {
+        { 6,  sf6ch,  ELRS_915_CHANNELS, &rotSF6,  elrs915Freq },
+        { 7,  sf7ch,  ELRS_915_CHANNELS, &rotSF7,  elrs915Freq },
+        { 8,  sf8ch,  ELRS_915_CHANNELS, &rotSF8,  elrs915Freq },
+        { 9,  sf9ch,  ELRS_915_CHANNELS, &rotSF9,  elrs915Freq },
+        { 10, sf10ch, ELRS_915_CHANNELS, &rotSF10, elrs915Freq },
+        { 11, sf11ch, ELRS_868_CHANNELS, &rotSF11, elrs868Freq },
+        { 12, sf12ch, ELRS_915_CHANNELS, &rotSF12, elrs915Freq },
+    };
+
+    for (int s = 0; s < 7; s++) {
+        SFScan& sc = sfScans[s];
+        radio.setSpreadingFactor(sc.sf);
+
+        int stride = sc.totalCh / sc.chCount;
+        if (stride < 1) stride = 1;
+        int offset = (*sc.rot) % stride;
+        (*sc.rot)++;
+
+        for (int i = 0; i < sc.chCount; i++) {
+            int ch = (offset + i * stride) % sc.totalCh;
+            float freq = sc.fn(ch);
+            radio.setFrequency(freq);
+
+            if (radio.scanChannel() == RADIOLIB_LORA_DETECTED) {
+                CadTap* existing = findTap(freq, sc.sf);
+                if (!existing) addTap(freq, sc.sf, BAND_SUB_GHZ);
+                // Match SX1262: don't tapHit in Phase 2 broad scan (already done in Phase 1).
+                // Only existing taps with 2+ consecutive hits contribute to diversity.
+                if (existing && warmupComplete && existing->consecutiveHits >= 2 &&
+                    !isWarmupAmbient(freq, sc.sf))
+                    recordDiversityHit(freq, sc.sf);
+            }
+        }
+    }
+
+    // ── PHASE 2b: 2.4 GHz CAD scan — SF6-SF8, BW800 ──────────────────
+    // LR1121 handles band switching transparently via setFrequency()
+    radio.setBandwidth(812.5);  // BW800 for 2.4 GHz
+
+    // Re-check active 2.4 GHz taps first
+    for (int i = 0; i < MAX_TAPS; i++) {
+        if (!tapList[i].active || tapList[i].isFsk) continue;
+        if (tapList[i].band != BAND_2G4) continue;
+        radio.setSpreadingFactor(tapList[i].sf);
+        radio.setFrequency(tapList[i].frequency);
+        if (radio.scanChannel() == RADIOLIB_LORA_DETECTED) {
+            tapHit(&tapList[i]);
+            if (warmupComplete && tapList[i].consecutiveHits >= 2)
+                recordDiversityHit(tapList[i].frequency, tapList[i].sf);
+        } else {
+            tapMiss(&tapList[i]);
+        }
+    }
+
+    // Broad 2.4 GHz scan — SF6/SF7/SF8 rotating
+    SFScan sf24Scans[] = {
+        { 6, CAD_24_SF6, ELRS_24_CHANNELS, &rot24SF6, elrs24Freq },
+        { 7, CAD_24_SF7, ELRS_24_CHANNELS, &rot24SF7, elrs24Freq },
+        { 8, CAD_24_SF8, ELRS_24_CHANNELS, &rot24SF8, elrs24Freq },
+    };
+
+    for (int s = 0; s < 3; s++) {
+        SFScan& sc = sf24Scans[s];
+        radio.setSpreadingFactor(sc.sf);
+
+        int stride = sc.totalCh / sc.chCount;
+        if (stride < 1) stride = 1;
+        int offset = (*sc.rot) % stride;
+        (*sc.rot)++;
+
+        for (int i = 0; i < sc.chCount; i++) {
+            int ch = (offset + i * stride) % sc.totalCh;
+            float freq = sc.fn(ch);
+            radio.setFrequency(freq);
+
+            if (radio.scanChannel() == RADIOLIB_LORA_DETECTED) {
+                CadTap* existing = findTap(freq, sc.sf);
+                if (!existing) addTap(freq, sc.sf, BAND_2G4);
+                // Match Phase 2a behavior: no tapHit (done in Phase 2b re-check above)
+                if (existing && warmupComplete && existing->consecutiveHits >= 2)
+                    recordDiversityHit(freq, sc.sf);
+            }
+        }
+    }
+
+    // ── PHASE 4: Switch back to GFSK for RSSI sweep ──────────────────
+    switchToGFSK_LR(radio);
+
+    // ── PHASE 3: FSK Crossfire scan ──────────────────────────────────
+    // Radio is in GFSK mode. Reconfigure for Crossfire 150 Hz detection.
+    {
+        int16_t fskErr = radio.setBitRate(85.1);
+        if (fskErr == RADIOLIB_ERR_NONE) {
+            radio.setFrequencyDeviation(25.0);
+            radio.setRxBandwidth(117.3);
+
+            // Re-check existing FSK taps
+            for (int i = 0; i < MAX_TAPS; i++) {
+                if (!tapList[i].active || !tapList[i].isFsk) continue;
+                radio.setFrequency(tapList[i].frequency);
+                radio.startReceive();
+                delayMicroseconds(FSK_DWELL_US);
+                float r = radio.getInstantRSSI();
+                if (r > FSK_DETECT_THRESHOLD_DBM) tapHit(&tapList[i]);
+                else tapMiss(&tapList[i]);
+            }
+
+            // Scan new Crossfire channels (rotating)
+            int stride = CRSF_CHANNELS / FSK_CH;
+            if (stride < 1) stride = 1;
+            int offset = rotFSK % stride;
+            rotFSK++;
+
+            for (int i = 0; i < FSK_CH; i++) {
+                int ch = (offset + i * stride) % CRSF_CHANNELS;
+                float freq = crsfFskFreq(ch);
+                radio.setFrequency(freq);
+                radio.startReceive();
+                delayMicroseconds(FSK_DWELL_US);
+
+                float r = radio.getInstantRSSI();
+                if (r > FSK_DETECT_THRESHOLD_DBM) {
+                    CadTap* existing = findTap(freq, 0);
+                    if (existing) tapHit(existing);
+                    else addFskTap(freq);
+                }
+            }
+        }
+
+        // Restore RSSI sweep GFSK params
+        radio.setBitRate(4.8);
+        radio.setFrequencyDeviation(50.0);
+        radio.setRxBandwidth(156.2);
+        radio.setRxBoostedGainMode(true);
+    }
+
+    // ── Warmup and ambient learning (shared with SX1262) ─────────────
+    warmupCycleCount++;
+
+    if (!warmupComplete) {
+        bool normalEnd = (millis() >= AMBIENT_WARMUP_MS);
+        bool earlyExit = (millis() >= AMBIENT_EARLY_EXIT_MS) && (result.totalActiveTaps == 0)
+                         && (ambientTapCount == 0);
+        if (normalEnd || earlyExit) {
+            warmupComplete = true;
+            if (earlyExit && !normalEnd) {
+                Serial.printf("[WARMUP] Early completion at %lus — clean environment. ",
+                              millis() / 1000);
+            }
+            Serial.printf("[WARMUP] Complete after %u cycles (%lus). %u ambient taps recorded:\n",
+                          warmupCycleCount, millis() / 1000, ambientTapCount);
+            for (uint8_t i = 0; i < ambientTapCount; i++) {
+                if (ambientTaps[i].active) {
+                    Serial.printf("  - %.1f MHz / SF%u (first seen cycle %u)\n",
+                                  ambientTaps[i].frequency, ambientTaps[i].sf,
+                                  ambientTaps[i].firstSeenCycle);
+                }
+            }
+        } else {
+            for (int i = 0; i < MAX_TAPS; i++) {
+                if (tapList[i].active && !tapList[i].isFsk) {
+                    recordAmbientTap(tapList[i].frequency, tapList[i].sf, true);
+                }
+            }
+        }
+    }
+
+    // Post-warmup continuous ambient learning
+    if (warmupComplete) {
+        unsigned long now = millis();
+        for (int i = 0; i < MAX_TAPS; i++) {
+            if (tapList[i].active &&
+                !tapList[i].isFsk &&
+                tapList[i].consecutiveHits >= TAP_CONFIRM_HITS &&
+                !isAmbientCadSource(tapList[i].frequency, tapList[i].sf)) {
+                if (tapList[i].firstSeenMs < AMBIENT_WARMUP_MS) {
+                    recordAmbientTap(tapList[i].frequency, tapList[i].sf, true);
+                }
+                else if ((now - tapList[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
+                    recordAmbientTap(tapList[i].frequency, tapList[i].sf, false);
+                }
+            }
+        }
+    }
+
+    // Tag taps with ambient status
+    if (warmupComplete) {
+        for (int i = 0; i < MAX_TAPS; i++) {
+            if (tapList[i].active) {
+                tapList[i].isAmbient = isAmbientCadSource(tapList[i].frequency, tapList[i].sf);
+            }
+        }
+    }
+
+    countConfirmed(result.confirmedCadCount, result.confirmedFskCount,
+                   result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
+    result.diversityCount = countDiversity(DIVERSITY_WINDOW_MS);
+    result.persistentDiversityCount = countPersistentDiversity(DIVERSITY_WINDOW_MS);
+    result.diversityVelocity = computeDiversityVelocity();
+    result.sustainedCycles = getSustainedDiversityCycles();
+
     return result;
 }
 
@@ -456,7 +800,8 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
         radio.setFrequency(tapList[i].frequency);
         if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
             tapHit(&tapList[i]);
-            if (warmupComplete && !isWarmupAmbient(tapList[i].frequency, tapList[i].sf))
+            if (warmupComplete && tapList[i].consecutiveHits >= 2 &&
+                !isWarmupAmbient(tapList[i].frequency, tapList[i].sf))
                 recordDiversityHit(tapList[i].frequency, tapList[i].sf);
         } else {
             bool adjHit = false;
@@ -467,7 +812,8 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                     radio.setFrequency(adjFreq);
                     if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
                         tapHit(&tapList[i]);
-                        if (warmupComplete && !isWarmupAmbient(adjFreq, tapList[i].sf))
+                        if (warmupComplete && tapList[i].consecutiveHits >= 2 &&
+                            !isWarmupAmbient(adjFreq, tapList[i].sf))
                             recordDiversityHit(adjFreq, tapList[i].sf);
                         adjHit = true;
                         break;
@@ -510,10 +856,14 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                 radio.setFrequency(freq);
                 if (radio.scanChannel(cfg6) == RADIOLIB_LORA_DETECTED) {
                     CadTap* existing = findTap(freq, 6);
-                    if (existing) tapHit(existing);
-                    else addTap(freq, 6);
-                    if (warmupComplete && !isWarmupAmbient(freq, 6))
-                        recordDiversityHit(freq, 6);
+                    if (existing) {
+                        tapHit(existing);
+                        if (warmupComplete && existing->consecutiveHits >= 2 &&
+                            !isWarmupAmbient(freq, 6))
+                            recordDiversityHit(freq, 6);
+                    } else {
+                        addTap(freq, 6);
+                    }
                 }
                 guidedScans++;
             }
@@ -602,7 +952,10 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
             if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
                 CadTap* existing = findTap(freq, sc.sf);
                 if (!existing) addTap(freq, sc.sf);
-                if (warmupComplete && !isWarmupAmbient(freq, sc.sf))
+                // Only record diversity if existing tap already has 2+ consecutive hits.
+                // New taps (just created above) start at 1, excluded by this check.
+                if (existing && warmupComplete && existing->consecutiveHits >= 2 &&
+                    !isWarmupAmbient(freq, sc.sf))
                     recordDiversityHit(freq, sc.sf);
             }
         }

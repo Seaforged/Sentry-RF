@@ -103,14 +103,15 @@ static const bool WIFI_ENABLED  = true;
 // ----- LilyGo T3S3 with LR1121 (dual-band: sub-GHz + 2.4 GHz) -----
 // Identical pin mapping to T3S3 SX1262 — only the radio chip differs
 
-// LR1121 LoRa SPI (same pins as T3S3 SX1262)
+// LR1121 LoRa SPI (same SPI bus as T3S3 SX1262, but IRQ is DIO9 not DIO1)
 static const int PIN_LORA_SCK  = 5;
 static const int PIN_LORA_MISO = 3;
 static const int PIN_LORA_MOSI = 6;
 static const int PIN_LORA_CS   = 7;
 static const int PIN_LORA_RST  = 8;
-static const int PIN_LORA_DIO1 = 33;
+static const int PIN_LORA_DIO1 = 36;   // LR1121 uses DIO9 (GPIO 36) as IRQ, not DIO1
 static const int PIN_LORA_BUSY = 34;
+static const float LR1121_TCXO_VOLTAGE = 3.0f;  // LR1121 TCXO is 3.0V (2.85-3.15V range)
 
 // OLED SSD1306 I2C
 static const int PIN_OLED_SDA = 18;

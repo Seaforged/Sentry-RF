@@ -35,9 +35,23 @@ struct ScanResult24 {
 
 // Sub-GHz scanner — works on both SX1262 and LR1121
 #ifdef BOARD_T3S3_LR1121
-int scannerInit(LR1121& radio);
-void scannerSweep(LR1121& radio, ScanResult& result);
-void scannerSweep24(LR1121& radio, ScanResult24& result);
+
+// Expose getRssiInst() which is protected in LR11x0 base class.
+// RadioLib v7.6 only has getRSSI() (packet RSSI, useless for scanning).
+// Instantaneous RSSI requires the protected getRssiInst() SPI command.
+class LR1121_RSSI : public LR1121 {
+public:
+    using LR1121::LR1121;
+    float getInstantRSSI() {
+        float rssi = 0;
+        getRssiInst(&rssi);
+        return rssi;
+    }
+};
+
+int scannerInit(LR1121_RSSI& radio);
+void scannerSweep(LR1121_RSSI& radio, ScanResult& result);
+void scannerSweep24(LR1121_RSSI& radio, ScanResult24& result);
 #else
 int scannerInit(SX1262& radio);
 void scannerSweep(SX1262& radio, ScanResult& result);

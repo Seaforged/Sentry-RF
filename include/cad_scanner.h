@@ -9,9 +9,12 @@
 
 // ── Tap-and-verify data structures ──────────────────────────────────────────
 
+enum RfBand : uint8_t { BAND_SUB_GHZ = 0, BAND_2G4 = 1 };
+
 struct CadTap {
     float    frequency;
     uint8_t  sf;              // 0 for FSK taps
+    RfBand   band;            // BAND_SUB_GHZ or BAND_2G4
     uint8_t  consecutiveHits;
     uint8_t  missCount;
     unsigned long firstSeenMs;
@@ -42,7 +45,7 @@ void resetDiversityTracker();
 // Run the full fishing pole scan cycle.
 // Called from loRaScanTask every cycle. rssi may be nullptr if no RSSI data yet.
 #ifdef BOARD_T3S3_LR1121
-CadFskResult cadFskScan(LR1121& radio, uint32_t cycleNum, const ScanResult* rssi = nullptr);
+CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult* rssi = nullptr);
 #else
 CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi = nullptr);
 #endif
