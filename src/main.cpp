@@ -17,6 +17,7 @@
 #include "data_logger.h"
 #include "wifi_scanner.h"
 #include "alert_handler.h"
+#include "error_messages.h"
 
 // Hardware objects — each owned by exactly one task after setup()
 SPIClass loraSPI(HSPI);
@@ -458,7 +459,7 @@ void setup() {
     if (hwState != RADIOLIB_ERR_NONE) {
         Serial.printf("[INIT] Radio hardware init failed: %d\n", hwState);
         char detail[22];
-        snprintf(detail, sizeof(detail), "Code: %d", hwState);
+        formatRadioError(detail, sizeof(detail), hwState);
         displayFatalError(oled, "Radio HW init", detail);
         for (;;) delay(1000);
     }
@@ -467,7 +468,7 @@ void setup() {
     if (scanState != RADIOLIB_ERR_NONE) {
         Serial.printf("[INIT] Scanner init failed: %d\n", scanState);
         char detail[22];
-        snprintf(detail, sizeof(detail), "Code: %d", scanState);
+        formatRadioError(detail, sizeof(detail), scanState);
         displayFatalError(oled, "Scanner init", detail);
         for (;;) delay(1000);
     }
