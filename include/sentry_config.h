@@ -48,7 +48,7 @@ static const int   TAP_EXPIRE_MISSES     = 3;       // consecutive misses to dea
 static const float TAP_FREQ_TOL          = 0.2f;    // MHz — +/-200 kHz to match existing tap
 
 // ── CAD Channel Allocation ────────────────────────────────────────────
-static const int CAD_CH_SF6  = 60;   // ELRS 200Hz — covers 80ch in 1.3 cycles
+static const int CAD_CH_SF6  = 80;   // ELRS 200Hz — full 80ch coverage every cycle (v1.6.1 coverage-gap fix)
 static const int CAD_CH_SF7  = 40;   // ELRS 150Hz — covers 80ch in 2 cycles
 static const int CAD_CH_SF8  = 20;   // ELRS 100Hz
 static const int CAD_CH_SF9  = 10;
@@ -79,18 +79,28 @@ static const float RSSI_GUIDED_THRESH_DB = 8.0f;   // dB above NF for guided CAD
 static const int   RSSI_GUIDED_MAX_BINS  = 8;      // max elevated bins to CAD-check
 
 // ── Frequency Diversity (FHSS Detection) ─────────────────────────────
-static const unsigned long DIVERSITY_WINDOW_MS = 3000;    // 3-second sliding window
+static const unsigned long DIVERSITY_WINDOW_MS = 8000;    // 8s window — covers ~3 CAD cycles at 2.7s each (v1.6.1 FHSS fix)
 static const int DIVERSITY_WARNING             = 3;       // used by pursuit mode activation
 static const int MAX_DIVERSITY_SLOTS           = 32;      // max tracked distinct frequencies
 // NOTE: Threat level mapping is now via SCORE_* thresholds, not DIVERSITY_*.
 
 // ── AAD: Persistence Gate + Diversity Velocity ───────────────────────
 static const uint8_t PERSISTENCE_MIN_CONSECUTIVE = 5;     // consecutive high-diversity cycles before qualifying (was 3, raised after 28-min soak showed ambient sustaining 4)
-static const uint8_t PERSISTENCE_MIN_DIVERSITY   = 3;     // min raw diversity to count as "sustained"
+static const uint8_t PERSISTENCE_MIN_DIVERSITY   = 2;     // min raw diversity to count as "sustained" (v1.6.1: lowered from 3 because ambient filter consumes most of the frequency space)
 static const uint8_t DIVERSITY_VELOCITY_WINDOW   = 3;     // scan cycles for velocity calculation
 static const uint8_t DIVERSITY_VELOCITY_FHSS_MIN = 2;     // min velocity for full FHSS confidence
 static const uint8_t DIVERSITY_VELOCITY_BONUS_MIN = 5;    // min velocity for bonus confidence points
 static const uint8_t DIVERSITY_VELOCITY_BONUS_PTS = 10;   // bonus confidence points for high velocity
+
+// ── FHSS Frequency-Spread Tracker (v1.6.1) ───────────────────────────
+// Second diversity path that does NOT require consecutiveHits>=2 on the
+// same freq. Counts UNIQUE (freq,sf) CAD hits across a sliding ring of
+// cycles. When spread >= threshold, each unique freq is pushed into the
+// existing recordDiversityHit() path so normal persistence/velocity/
+// escalation logic applies. Addresses FHSS-invisibility regression found
+// during JJ v2.0.0 real-signal testing 2026-04-11.
+static const uint8_t FHSS_WINDOW_CYCLES    = 3;     // rolling window size
+static const uint8_t FHSS_UNIQUE_THRESHOLD = 4;     // min unique freqs to fire
 
 // ── RSSI Ambient Filter ──────────────────────────────────────────────
 static const int   AMBIENT_HISTORY_DEPTH   = 10;    // sweeps of history before baseline
