@@ -22,6 +22,15 @@ static const float DISPLAY_RSSI_MAX = -40.0;
 void displayInit(Adafruit_SSD1306& disp);
 void displayBootSplash(Adafruit_SSD1306& disp);
 
+// Fatal-error screen with version header and up to two info lines.
+// Caller is expected to halt (e.g. for(;;) delay(1000);) after this call.
+void displayFatalError(Adafruit_SSD1306& disp, const char* line1, const char* line2 = nullptr);
+
+// Non-fatal warning screen — boot continues. Caller typically delay(3000)
+// after this call so the operator has time to read the message before the
+// display task overwrites it with the dashboard.
+void displayWarning(Adafruit_SSD1306& disp, const char* line1, const char* line2 = nullptr);
+
 // Screen 0: Dashboard summary — all-in-one glance
 void screenDashboard(Adafruit_SSD1306& disp, const SystemState& state, int page);
 
