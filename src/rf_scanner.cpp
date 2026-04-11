@@ -36,6 +36,15 @@ int scannerInit(LR1121_RSSI& radio) {
     // LR1121::beginGFSK(freq, br, freqDev, rxBw, power, preambleLength, tcxoVoltage)
     // 7-arg signature — frequency first, TCXO voltage last (SPI init happens inside)
     // Max freq deviation 200 kHz (SX1262 allows 234.3)
+    //
+    // INTENTIONAL DIVERGENCE from SX1262 (which uses dev=5.0, rxBw=234.3):
+    // - LR1121 freqDev=50.0: LR11x0 has a different GFSK noise floor and
+    //   demod behavior; 50 kHz deviation centers the RX filter for better
+    //   RSSI stability vs. SX126x's narrow 5 kHz config. Both are valid
+    //   for pure RSSI sweep (we don't decode GFSK packets here).
+    // - LR1121 rxBw=156.2: integrates ~33% less adjacent noise than the
+    //   SX1262's 234.3 kHz bin — intentional asymmetry, affects only the
+    //   absolute RSSI baseline, not relative peak detection.
     int state = radio.beginGFSK(915.0, 4.8, 50.0, 156.2, 10, 16, LR1121_TCXO_VOLTAGE);
     if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("[SCAN] GFSK init failed: %d\n", state);
@@ -143,6 +152,14 @@ int scannerInit(SX1262& radio) {
 
     // Init in FSK mode — proven to work, used for RSSI sweeps.
     // CAD scans switch to LoRa packet type via low-level SPI command.
+    //
+    // INTENTIONAL DIVERGENCE from LR1121 (which uses dev=50.0, rxBw=156.2):
+    // - SX1262 freqDev=5.0: narrower deviation matches SX126x's 25 kHz
+    //   minimum Gaussian filter response. Field-proven in v1.5.3 at 842m.
+    // - SX1262 rxBw=234.3: wider RX bandwidth compensates for the narrower
+    //   deviation, keeping RSSI reads stable across the sweep.
+    // Do NOT "harmonize" these values to match the LR1121 — both boards
+    // have independently tuned baselines that work on their own hardware.
     int state = radio.beginFSK(915.0, 4.8, 5.0, 234.3, 10, 16);
     if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("[SCAN] FSK init failed: %d\n", state);
