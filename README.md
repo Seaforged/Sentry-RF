@@ -1,3 +1,5 @@
+![SENTRY-RF](SENTRY-RF%20Logo.png)
+
 # SENTRY-RF
 
 **Passive drone RF detection + GNSS jamming/spoofing monitor for ESP32-S3**
