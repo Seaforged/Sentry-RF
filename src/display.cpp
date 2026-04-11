@@ -118,6 +118,70 @@ void displayBootSplash(Adafruit_SSD1306& disp) {
     // (the init sequence takes 8-10 seconds with GPS timeout)
 }
 
+void displayFatalError(Adafruit_SSD1306& disp, const char* line1, const char* line2) {
+    disp.clearDisplay();
+    disp.setTextSize(1);
+    disp.setTextColor(SSD1306_WHITE);
+
+    // Version header — tester can identify firmware even without serial
+    disp.setCursor(0, 0);
+    disp.printf("%s v%s", FW_NAME, FW_VERSION);
+    disp.drawFastHLine(0, 9, SCREEN_WIDTH, SSD1306_WHITE);
+
+    // Inverted "FATAL" band for visibility
+    disp.fillRect(0, 12, SCREEN_WIDTH, 11, SSD1306_WHITE);
+    disp.setTextColor(SSD1306_BLACK);
+    disp.setCursor(2, 14);
+    disp.print("FATAL ERROR");
+    disp.setTextColor(SSD1306_WHITE);
+
+    // Error lines
+    disp.setCursor(0, 28);
+    disp.print(line1);
+    if (line2 != nullptr) {
+        disp.setCursor(0, 40);
+        disp.print(line2);
+    }
+
+    // Hint line — reboot required
+    disp.setCursor(0, 54);
+    disp.print("Fix + power cycle");
+
+    disp.display();
+}
+
+void displayWarning(Adafruit_SSD1306& disp, const char* line1, const char* line2) {
+    disp.clearDisplay();
+    disp.setTextSize(1);
+    disp.setTextColor(SSD1306_WHITE);
+
+    // Version header
+    disp.setCursor(0, 0);
+    disp.printf("%s v%s", FW_NAME, FW_VERSION);
+    disp.drawFastHLine(0, 9, SCREEN_WIDTH, SSD1306_WHITE);
+
+    // Inverted "WARNING" band — same layout as fatal but non-blocking
+    disp.fillRect(0, 12, SCREEN_WIDTH, 11, SSD1306_WHITE);
+    disp.setTextColor(SSD1306_BLACK);
+    disp.setCursor(2, 14);
+    disp.print("WARNING");
+    disp.setTextColor(SSD1306_WHITE);
+
+    // Warning lines
+    disp.setCursor(0, 28);
+    disp.print(line1);
+    if (line2 != nullptr) {
+        disp.setCursor(0, 40);
+        disp.print(line2);
+    }
+
+    // Hint — boot is continuing, not halted
+    disp.setCursor(0, 54);
+    disp.print("Continuing boot...");
+
+    disp.display();
+}
+
 // ── Spectrum helpers ────────────────────────────────────────
 
 static const int CHART_HEIGHT   = 38;  // reduced from 42 to leave room for peak text

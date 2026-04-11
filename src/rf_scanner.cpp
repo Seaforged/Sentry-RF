@@ -1,6 +1,15 @@
 #include "rf_scanner.h"
 #include "board_config.h"
+#include "sentry_config.h"
 #include <Arduino.h>
+
+// 10 test frequencies spread across 860-928 MHz for boot-time antenna check
+static const float ANTENNA_TEST_FREQS[] = {
+    860.0f, 867.5f, 875.0f, 882.5f, 890.0f,
+    897.5f, 905.0f, 912.5f, 920.0f, 927.5f
+};
+static const int ANTENNA_TEST_COUNT = sizeof(ANTENNA_TEST_FREQS) / sizeof(ANTENNA_TEST_FREQS[0]);
+static const int ANTENNA_TEST_DWELL_US = 5000;  // 5ms per bin — stable RSSI reads
 
 // ── Sub-GHz scanner (SX1262 and LR1121) ────────────────────────────────────
 
@@ -68,6 +77,34 @@ void scannerSweep(LR1121_RSSI& radio, ScanResult& result) {
     }
 
     result.sweepTimeMs = millis() - startTime;
+}
+
+bool scannerAntennaCheck(LR1121_RSSI& radio) {
+    float peakRssi = -200.0f;
+    float minRssi = 0.0f;
+    float peakFreq = 0.0f;
+    bool firstSample = true;
+
+    for (int i = 0; i < ANTENNA_TEST_COUNT; i++) {
+        if (radio.setFrequency(ANTENNA_TEST_FREQS[i]) != RADIOLIB_ERR_NONE) continue;
+        radio.startReceive();  // LR1121 drops to standby after setFrequency
+        delayMicroseconds(ANTENNA_TEST_DWELL_US);
+        float rssi = radio.getInstantRSSI();
+        if (firstSample) { minRssi = rssi; firstSample = false; }
+        if (rssi > peakRssi) { peakRssi = rssi; peakFreq = ANTENNA_TEST_FREQS[i]; }
+        if (rssi < minRssi) { minRssi = rssi; }
+    }
+
+    float variance = peakRssi - minRssi;
+    bool absPass = (peakRssi > ANTENNA_CHECK_THRESHOLD_DBM);
+    bool varPass = (variance > ANTENNA_CHECK_VARIANCE_DB);
+    bool connected = absPass && varPass;
+
+    Serial.printf("[ANTENNA] Peak %.1f dBm @ %.1f MHz, var %.1f dB (thresh %.1f dBm / %.1f dB) — %s\n",
+                  peakRssi, peakFreq, variance,
+                  ANTENNA_CHECK_THRESHOLD_DBM, ANTENNA_CHECK_VARIANCE_DB,
+                  connected ? "OK" : "FAIL");
+    return connected;
 }
 
 // 2.4 GHz sweep — LR1121 handles band switching transparently via setFrequency()
@@ -155,6 +192,35 @@ void scannerSweep(SX1262& radio, ScanResult& result) {
     // Debug: check RSSI at key frequencies across the band
     Serial.printf("[SCAN-DBG] 860:%.0f 880:%.0f 900:%.0f 920:%.0f\n",
                   result.rssi[0], result.rssi[100], result.rssi[200], result.rssi[300]);
+}
+
+bool scannerAntennaCheck(SX1262& radio) {
+    float peakRssi = -200.0f;
+    float minRssi = 0.0f;
+    float peakFreq = 0.0f;
+    bool firstSample = true;
+
+    for (int i = 0; i < ANTENNA_TEST_COUNT; i++) {
+        if (radio.setFrequency(ANTENNA_TEST_FREQS[i]) != RADIOLIB_ERR_NONE) continue;
+        radio.startReceive();
+        delayMicroseconds(ANTENNA_TEST_DWELL_US);
+        float rssi = radio.getRSSI(false);
+        if (firstSample) { minRssi = rssi; firstSample = false; }
+        if (rssi > peakRssi) { peakRssi = rssi; peakFreq = ANTENNA_TEST_FREQS[i]; }
+        if (rssi < minRssi) { minRssi = rssi; }
+    }
+    radio.standby();
+
+    float variance = peakRssi - minRssi;
+    bool absPass = (peakRssi > ANTENNA_CHECK_THRESHOLD_DBM);
+    bool varPass = (variance > ANTENNA_CHECK_VARIANCE_DB);
+    bool connected = absPass && varPass;
+
+    Serial.printf("[ANTENNA] Peak %.1f dBm @ %.1f MHz, var %.1f dB (thresh %.1f dBm / %.1f dB) — %s\n",
+                  peakRssi, peakFreq, variance,
+                  ANTENNA_CHECK_THRESHOLD_DBM, ANTENNA_CHECK_VARIANCE_DB,
+                  connected ? "OK" : "FAIL");
+    return connected;
 }
 
 #endif // BOARD_T3S3_LR1121

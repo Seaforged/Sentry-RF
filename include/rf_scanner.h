@@ -52,9 +52,11 @@ public:
 int scannerInit(LR1121_RSSI& radio);
 void scannerSweep(LR1121_RSSI& radio, ScanResult& result);
 void scannerSweep24(LR1121_RSSI& radio, ScanResult24& result);
+bool scannerAntennaCheck(LR1121_RSSI& radio);
 #else
 int scannerInit(SX1262& radio);
 void scannerSweep(SX1262& radio, ScanResult& result);
+bool scannerAntennaCheck(SX1262& radio);
 #endif
 
 // Print helpers — radio-independent

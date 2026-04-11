@@ -457,23 +457,31 @@ void setup() {
     int hwState = initRadioHardware();
     if (hwState != RADIOLIB_ERR_NONE) {
         Serial.printf("[INIT] Radio hardware init failed: %d\n", hwState);
-        oled.clearDisplay();
-        oled.setTextSize(1);
-        oled.setCursor(0, 0);
-        oled.printf("RADIO HW FAIL: %d", hwState);
-        oled.display();
+        char detail[22];
+        snprintf(detail, sizeof(detail), "Code: %d", hwState);
+        displayFatalError(oled, "Radio HW init", detail);
         for (;;) delay(1000);
     }
 
     int scanState = scannerInit(radio);
     if (scanState != RADIOLIB_ERR_NONE) {
         Serial.printf("[INIT] Scanner init failed: %d\n", scanState);
-        oled.clearDisplay();
-        oled.setTextSize(1);
-        oled.setCursor(0, 0);
-        oled.printf("SCANNER FAIL: %d", scanState);
-        oled.display();
+        char detail[22];
+        snprintf(detail, sizeof(detail), "Code: %d", scanState);
+        displayFatalError(oled, "Scanner init", detail);
         for (;;) delay(1000);
+    }
+
+    // Boot-time antenna self-test — warns only, does NOT halt.
+    // Passive RSSI detection false-fails in RF-quiet environments (rural, shielded
+    // rooms) where ambient 915 MHz energy stays below detection threshold even with
+    // a properly connected antenna. Hard-halting would brick healthy boards in those
+    // environments, so we log the result, show a brief on-screen warning, and let
+    // boot continue. Operator can verify by looking at the RF spectrum screen.
+    if (!scannerAntennaCheck(radio)) {
+        Serial.println("[INIT] Antenna check failed — sub-GHz antenna weak or missing");
+        displayWarning(oled, "Antenna weak/missing", "Check SMA connection");
+        delay(3000);
     }
 
     cadScannerInit();

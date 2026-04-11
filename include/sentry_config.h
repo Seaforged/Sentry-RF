@@ -13,6 +13,17 @@ static const float PEAK_THRESHOLD_DB     = 10.0f;  // dB above noise floor for p
 static const float PEAK_ABS_FLOOR_DBM    = -85.0f; // dBm minimum for RSSI peak
 static const int   MAX_PEAKS             = 8;       // max peaks extracted per sweep
 
+// NOTE: ANTENNA_CHECK_THRESHOLD_DBM lives in board_config.h — noise floor
+// differs per chipset (SX1262 ~-110 dBm, LR1121 ~-127 dBm) so the threshold
+// must be board-specific to avoid false positives.
+
+// Variance floor for the antenna self-test. This is a SANITY gate, not the
+// primary discriminator — bare SMA stubs in strong RF can still show 15-20 dB
+// variance due to frequency-selective pickup. 3 dB just catches completely
+// dead reception. The per-board ANTENNA_CHECK_THRESHOLD_DBM in board_config.h
+// is the real discriminator. Variance is logged for operator diagnostics.
+static const float ANTENNA_CHECK_VARIANCE_DB = 3.0f;
+
 // ── Band Energy Trending (902-928 MHz) ────────────────────────────────
 static const int   BAND_ENERGY_HISTORY   = 10;      // sweeps in rolling average
 static const float BAND_ENERGY_THRESH_DB = 8.0f;    // dB above baseline (5.0 caused bench false WARNING)

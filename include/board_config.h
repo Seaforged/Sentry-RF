@@ -58,6 +58,12 @@ static const bool HAS_LR1121    = false;
 static const bool HAS_24GHZ     = false;
 static const bool WIFI_ENABLED  = true;
 
+// Antenna boot self-test peak threshold — primary discriminator.
+// With antenna connected we expect ambient 915 MHz pickup above -95 dBm in
+// any populated area; bare SMA stubs top out around -105 to -110 dBm even
+// near strong emitters. -100 gives ~8 dB margin below worst-case stub pickup.
+static const float ANTENNA_CHECK_THRESHOLD_DBM = -100.0f;
+
 #elif defined(BOARD_HELTEC_V3)
 // ----- Heltec WiFi LoRa 32 V3 -----
 
@@ -98,6 +104,9 @@ static const bool HAS_COMPASS   = false;
 static const bool HAS_LR1121    = false;
 static const bool HAS_24GHZ     = false;
 static const bool WIFI_ENABLED  = true;
+
+// Antenna boot self-test peak threshold — same SX1262 chipset as T3S3
+static const float ANTENNA_CHECK_THRESHOLD_DBM = -100.0f;
 
 #elif defined(BOARD_T3S3_LR1121)
 // ----- LilyGo T3S3 with LR1121 (dual-band: sub-GHz + 2.4 GHz) -----
@@ -152,6 +161,14 @@ static const bool HAS_COMPASS   = true;
 static const bool HAS_LR1121    = true;
 static const bool HAS_24GHZ     = true;
 static const bool WIFI_ENABLED  = true;
+
+// Antenna boot self-test peak threshold — LR1121 has a quieter noise floor
+// (~-127 dBm) but ambient RF pickup in quiet environments only reaches
+// -118 to -120 dBm at this chipset. -122 catches dead hardware (reads at
+// -127 to -128 dBm clamp) while passing a connected antenna in quiet RF.
+// Trade-off: cannot reliably detect loose connections on LR1121 — see
+// release notes for v1.6.0 known limitations.
+static const float ANTENNA_CHECK_THRESHOLD_DBM = -122.0f;
 
 #else
 #error "No board defined! Use -DBOARD_T3S3, -DBOARD_HELTEC_V3, or -DBOARD_T3S3_LR1121"
