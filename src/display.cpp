@@ -56,6 +56,16 @@ static const char* threatStr(ThreatLevel t) {
     }
 }
 
+// Unified buzzer state label across Dashboard, Threat, and System screens.
+// Priority: Off (no hardware) > MUTED > ACK'd > Active (WARNING+) > Armed.
+static const char* buzzerStateStr(const SystemState& state) {
+    if (!HAS_BUZZER) return "Off";
+    if (alertIsMuted()) return "MUTED";
+    if (alertIsAcknowledged()) return "ACK'd";
+    if (state.threatLevel >= THREAT_WARNING) return "Active";
+    return "Armed";
+}
+
 // Check if GPS data is valid and sane (not uninitialized garbage)
 static bool gpsIsValid(const GpsData& g) {
     if (!g.valid) return false;
@@ -243,9 +253,13 @@ void screenDashboard(Adafruit_SSD1306& disp, const SystemState& state, int page)
     disp.setCursor(0, 22);
     if (gpsIsValid(state.gps)) {
         char buf[22];
-        snprintf(buf, sizeof(buf), "%s %dSV J:%s S:%s",
+        // J: shows raw jamInd (0-255). jammingState is often stuck at 0
+        // ("unknown/disabled") on u-blox M10 MON-HW, so the categorized
+        // jammingStr() was showing misleading dashes. Raw jamInd is always
+        // populated when GPS is valid (which is already gated above).
+        snprintf(buf, sizeof(buf), "%s %dSV J:%d S:%s",
                  fixTypeStr(state.gps.fixType), state.gps.numSV,
-                 jammingStr(state.gps.jammingState),
+                 state.gps.jamInd,
                  (state.gps.spoofDetState >= 2) ? "!" : "OK");
         disp.print(buf);
     } else {
@@ -399,13 +413,9 @@ void screenIntegrity(Adafruit_SSD1306& disp, const SystemState& state, int page)
         snprintf(buf, sizeof(buf), "C/N0sd:%.1f", state.integrity.cnoStdDev);
         disp.print(buf);
 
-        disp.setCursor(0, 42);
-        if (state.gps.jammingState == 0 && state.gps.agcPercent == 0) {
-            disp.print("AGC: --");
-        } else {
-            snprintf(buf, sizeof(buf), "AGC: %d%%", state.gps.agcPercent);
-            disp.print(buf);
-        }
+        // AGC line removed — u-blox M10 MON-HW does not reliably populate
+        // agcCnt, so the reading stayed at 0 and the display always showed
+        // "AGC: --". Left blank rather than printing misleading placeholder.
     }
 
     drawPageDots(disp, page, NUM_SCREENS);
@@ -463,17 +473,9 @@ void screenThreat(Adafruit_SSD1306& disp, const SystemState& state, int page) {
         disp.print("Jam:-- Spf:--");
     }
 
-    // Buzzer status
+    // Buzzer status — unified Armed/Active/MUTED/ACK'd/Off via helper
     disp.setCursor(0, 42);
-    if (alertIsMuted()) {
-        disp.print("Buzzer: MUTED");
-    } else if (alertIsAcknowledged()) {
-        disp.print("Buzzer: ACK'd");
-    } else if (state.threatLevel >= THREAT_WARNING) {
-        disp.print("Buzzer: ARMED");
-    } else {
-        disp.print("Buzzer: standby");
-    }
+    disp.printf("Buzzer: %s", buzzerStateStr(state));
 
     // Bearing
     disp.setCursor(0, 52);
@@ -512,14 +514,11 @@ void screenSystem(Adafruit_SSD1306& disp, const SystemState& state, int page) {
     snprintf(buf, sizeof(buf), "Heap: %u", ESP.getFreeHeap());
     disp.print(buf);
 
+    // Buzzer + compass status — unified buzzer label via helper
     disp.setCursor(0, 42);
-    if (alertIsMuted()) {
-        unsigned long remain = alertMuteRemainingMs() / 1000;
-        snprintf(buf, sizeof(buf), "Buz:MUTED %lus", remain);
-    } else {
-        snprintf(buf, sizeof(buf), "Buz:Armed Cmp:%s",
-                 state.compass.valid ? "OK" : "--");
-    }
+    snprintf(buf, sizeof(buf), "Buz:%s Cmp:%s",
+             buzzerStateStr(state),
+             state.compass.valid ? "OK" : "--");
     disp.print(buf);
 
     drawPageDots(disp, page, NUM_SCREENS);
