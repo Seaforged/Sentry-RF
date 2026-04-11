@@ -42,6 +42,12 @@ struct SystemState {
     // WiFi Remote ID (written by wifiScanTask)
     bool            remoteIdDetected;
     unsigned long   remoteIdLastMs;
+    // WiFi per-channel activity for the Dashboard mini chart.
+    // Count is frames-per-snapshot-window (currently 1 second).
+    // wifiChannelSnapshotMs = 0 means "scanner not yet populated" — display
+    // should show "WiFi scan..." text fallback in that case.
+    uint8_t         wifiChannelCount[13];
+    unsigned long   wifiChannelSnapshotMs;
 };
 
 // Detection event sources

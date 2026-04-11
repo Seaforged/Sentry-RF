@@ -209,12 +209,17 @@ static int rssiToBarHeight(float rssi) {
     return (int)(normalized * CHART_HEIGHT);
 }
 
+// noinline: xtensa-esp32-elf-gcc ICEs (recog.c:2210, postreload RTL pass)
+// when this function gets inlined into screenSpectrum24 after the Dashboard
+// stopped calling it. Forcing noinline avoids the buggy register-constraint
+// path without changing behavior.
+__attribute__((noinline))
 static void drawMiniSpectrum(Adafruit_SSD1306& disp, int x, int y, int w, int h,
                              const float* rssi, int binCount) {
     for (int col = 0; col < w; col++) {
         int binStart = (col * binCount) / w;
         int binEnd = ((col + 1) * binCount) / w;
-        float peak = -200.0;
+        float peak = -200.0f;
         for (int b = binStart; b < binEnd; b++) {
             if (rssi[b] > peak) peak = rssi[b];
         }
@@ -222,6 +227,58 @@ static void drawMiniSpectrum(Adafruit_SSD1306& disp, int x, int y, int w, int h,
         int barH = (int)(((clamped - DISPLAY_RSSI_MIN) / (DISPLAY_RSSI_MAX - DISPLAY_RSSI_MIN)) * h);
         if (barH > 0) {
             disp.drawFastVLine(x + col, y + h - barH, barH, SSD1306_WHITE);
+        }
+    }
+}
+
+// WiFi channel activity mini chart — "WiFi" label + 13 wide discrete bars
+// (channels 1-13) spanning nearly the full Dashboard width. Label occupies
+// x..x+23 (4 chars, 24 px). Bars start at x+26 with 6 px width + 1 px gap =
+// 7 px per channel × 13 − 1 trailing gap = 90 px span (x+26..x+115). Heights
+// are log-scaled from frames-per-second counts captured by wifi_scanner.cpp.
+// If the scanner has not yet produced a snapshot, renders "WiFi scan" text
+// instead so the operator knows the region isn't broken.
+// Note: the `w` parameter is retained for API symmetry with drawMiniSpectrum
+// but internal layout is fixed at 116 px regardless of the passed value.
+static void drawMiniWifiChannels(Adafruit_SSD1306& disp, int x, int y, int w, int h,
+                                 const SystemState& state) {
+    (void)w;  // layout is fixed-width, see header comment
+
+    // Fallback: no data yet (first ~1 second of boot or scanner wedged).
+    if (state.wifiChannelSnapshotMs == 0) {
+        disp.setCursor(x, y);
+        disp.print("WiFi scan");
+        return;
+    }
+
+    // "WiFi" label flush left
+    disp.setCursor(x, y);
+    disp.print("WiFi");
+
+    // 13 bars, 6 px wide + 1 px gap, starting at x+26 (label width + 2 px pad)
+    const int barStartX = x + 26;
+    const int barWidth = 6;
+    const int gap = 1;
+    for (int ch = 0; ch < 13; ch++) {
+        uint8_t count = state.wifiChannelCount[ch];
+        int barH = 0;
+        if (count > 0) {
+            // Log-scale: 1->2, 2->3, 4->4, 8->5, 16->6, 32->7, 64+->h
+            // Gives a compressed visual that still distinguishes activity
+            // levels without a single busy AP saturating the chart.
+            int step = 0;
+            uint32_t c = count;
+            while (c > 0) { step++; c >>= 1; }  // step = floor(log2(count))+1
+            barH = 1 + step;
+            if (barH > h) barH = h;
+        }
+        int barX = barStartX + ch * (barWidth + gap);
+        if (barH > 0) {
+            disp.fillRect(barX, y + h - barH, barWidth, barH, SSD1306_WHITE);
+        } else {
+            // Single-pixel floor mark so the operator sees "channel exists,
+            // just quiet" rather than "channel missing from chart".
+            disp.drawFastHLine(barX, y + h - 1, barWidth, SSD1306_WHITE);
         }
     }
 }
@@ -246,14 +303,16 @@ void screenDashboard(Adafruit_SSD1306& disp, const SystemState& state, int page)
     disp.print(tStr);
     disp.setTextColor(SSD1306_WHITE);
 
-    // Line 1: Mini spectrum bars (sub-GHz)
-    drawMiniSpectrum(disp, 0, 12, 60, 8, state.spectrum.rssi, SCAN_BIN_COUNT);
-    disp.setCursor(64, 12);
-    if (state.spectrum24.valid) {
-        drawMiniSpectrum(disp, 68, 12, 60, 8, state.spectrum24.rssi, SCAN_24_BIN_COUNT);
-    } else {
-        disp.print("2.4:N/A");
-    }
+    // Line 1: Full-width WiFi channel activity chart. The 2.4 GHz mini
+    // spectrum that used to share this row was removed — it has its own
+    // dedicated full-screen view (Screen 6) and was leaving artifacts
+    // bleed-through on the Dashboard.
+    //
+    // Clear the full row before drawing — fillRect with height 10 (not just
+    // the chart's 8 px) gives safety margin against any prior render reaching
+    // into y=20..21 from a previous frame or a dirty buffer state.
+    disp.fillRect(0, 12, 128, 10, SSD1306_BLACK);
+    drawMiniWifiChannels(disp, 0, 12, 128, 8, state);
 
     // Line 2: GPS condensed
     disp.setCursor(0, 22);
@@ -384,14 +443,9 @@ void screenGPS(Adafruit_SSD1306& disp, const SystemState& state, int page) {
                  (int)(g.altMM / 1000), (int)(g.hAccMM / 1000));
         disp.print(buf);
 
-        disp.setCursor(0, 52);
-        if (state.compass.valid) {
-            snprintf(buf, sizeof(buf), "HDG:%.0f%c %s",
-                     state.compass.heading, 0xF8, state.compass.directionStr);
-            disp.print(buf);
-        } else {
-            disp.print("HDG: --");
-        }
+        // HDG line removed: compass isn't connected on current hardware and
+        // the y=52 row was colliding with the page dots. Alt+hAcc at y=42 is
+        // the last data line; dots render at y=60 with clean clearance.
     }
 
     drawPageDots(disp, page, NUM_SCREENS);
@@ -463,35 +517,33 @@ void screenThreat(Adafruit_SSD1306& disp, const SystemState& state, int page) {
         disp.print("RF: No signals");
     }
 
-    // GPS status
+    // GPS + jamming/spoofing combined on one line (was 2 lines at y=22/y=32).
+    // Freed vertical space keeps Buzzer and Bearing above the page-dot row.
+    // J: uses jammingStr when MON-HW is fresh; stale reads show "--" to
+    // distinguish "no data yet" from a real "no jamming" reading. S: is a
+    // binary "!" / "OK" from spoofDetState (Integrity screen has the full
+    // text label).
     disp.setCursor(0, 22);
     if (gpsIsValid(state.gps)) {
         char buf[22];
-        snprintf(buf, sizeof(buf), "GPS:%s %dSV",
-                 fixTypeStr(state.gps.fixType), state.gps.numSV);
+        const char* jStr = gpsMonHwIsFresh(state.gps)
+            ? jammingStr(state.gps.jammingState)
+            : "--";
+        snprintf(buf, sizeof(buf), "%s %dSV J:%s S:%s",
+                 fixTypeStr(state.gps.fixType), state.gps.numSV,
+                 jStr,
+                 (state.gps.spoofDetState >= 2) ? "!" : "OK");
         disp.print(buf);
     } else {
         disp.print("GPS: --");
     }
 
-    // Jamming/spoofing
+    // Buzzer status — unified Armed/Active/MUTED/ACK'd/Off via helper (moved y=42 -> y=32)
     disp.setCursor(0, 32);
-    if (gpsIsValid(state.gps)) {
-        char buf[22];
-        snprintf(buf, sizeof(buf), "Jam:%s Spf:%s",
-                 jammingStr(state.gps.jammingState),
-                 spoofStr(state.gps.spoofDetState));
-        disp.print(buf);
-    } else {
-        disp.print("Jam:-- Spf:--");
-    }
-
-    // Buzzer status — unified Armed/Active/MUTED/ACK'd/Off via helper
-    disp.setCursor(0, 42);
     disp.printf("Buzzer: %s", buzzerStateStr());
 
-    // Bearing
-    disp.setCursor(0, 52);
+    // Bearing (moved y=52 -> y=42 — clean clearance from page dots at y=60)
+    disp.setCursor(0, 42);
     if (state.compass.valid && state.compass.peakRSSI > -200.0 &&
         (millis() - state.compass.peakTimestamp < 30000)) {
         char buf[22];

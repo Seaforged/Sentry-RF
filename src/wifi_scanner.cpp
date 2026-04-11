@@ -21,6 +21,15 @@ struct CapturedFrame {
 static QueueHandle_t wifiPacketQueue = nullptr;
 static const int PACKET_QUEUE_DEPTH = 20;
 
+// Per-channel frame counters for Dashboard mini chart. Incremented from the
+// ISR callback on every captured management frame; snapshotted into
+// SystemState.wifiChannelCount by wifiScanTask once per second, then reset.
+// Non-atomic races are acceptable — losing 1-2 counts per second on a bar
+// chart is invisible. 32-bit counters, 13 channels indexed 0..12.
+static volatile uint32_t g_wifiFrameCounts[13] = {0};
+static unsigned long g_wifiLastSnapshotMs = 0;
+static const unsigned long WIFI_SNAPSHOT_INTERVAL_MS = 1000;
+
 // ── Known drone MAC OUI prefixes ────────────────────────────────────────────
 
 static const DroneOUI DRONE_OUIS[] = {
@@ -43,6 +52,13 @@ static void IRAM_ATTR wifiPromiscuousCallback(void* buf, wifi_promiscuous_pkt_ty
 
     const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
     if (pkt->rx_ctrl.sig_len < 24) return;  // too short for a management frame
+
+    // Count every captured management frame for the Dashboard channel
+    // activity chart. Channel 1-13 -> index 0-12.
+    int ch = pkt->rx_ctrl.channel;
+    if (ch >= 1 && ch <= 13) {
+        g_wifiFrameCounts[ch - 1]++;
+    }
 
     CapturedFrame frame;
     // Source MAC is at offset 10 in the 802.11 header
@@ -149,6 +165,23 @@ void wifiScanTask(void* param) {
             currentChannel = (currentChannel % 13) + 1;
             esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
             lastHopMs = millis();
+        }
+
+        // Snapshot per-channel frame counts into SystemState once per second
+        // so the Dashboard mini chart has current activity data. Reset the
+        // ISR-side counters after the snapshot to start a fresh window.
+        unsigned long now = millis();
+        if (now - g_wifiLastSnapshotMs >= WIFI_SNAPSHOT_INTERVAL_MS) {
+            if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                for (int i = 0; i < 13; i++) {
+                    uint32_t c = g_wifiFrameCounts[i];
+                    g_wifiFrameCounts[i] = 0;  // race window: single-frame losses acceptable
+                    systemState.wifiChannelCount[i] = (c > 255) ? 255 : (uint8_t)c;
+                }
+                systemState.wifiChannelSnapshotMs = now;
+                xSemaphoreGive(stateMutex);
+            }
+            g_wifiLastSnapshotMs = now;
         }
 
         // Process captured frames
