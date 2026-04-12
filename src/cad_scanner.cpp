@@ -129,6 +129,13 @@ struct AmbientTap {
 static AmbientTap ambientTaps[MAX_AMBIENT_TAPS];
 static uint8_t ambientTapCount = 0;
 static uint16_t warmupCycleCount = 0;
+
+// Cached radio mode — avoids redundant packet type switches.
+// On non-RSSI cycles, the radio never leaves LoRa mode so ensureLoRa() is a
+// no-op. Reset to MODE_UNKNOWN in cadScannerInit() and on any begin() call
+// that might reset the chip.
+enum RadioMode { MODE_UNKNOWN, MODE_LORA, MODE_GFSK };
+static RadioMode currentRadioMode = MODE_UNKNOWN;
 static bool warmupComplete = false;
 
 static uint16_t cadErrorsThisCycle = 0;
@@ -507,6 +514,7 @@ void cadScannerInit() {
     cadFirstError = 0;
     consecutiveFaultCycles = 0;
     consecutiveCleanCycles = 0;
+    currentRadioMode = MODE_UNKNOWN;
     rotSF6 = rotSF7 = rotSF8 = rotSF9 = rotSF10 = rotSF11 = rotSF12 = rotFSK = 0;
 }
 
@@ -596,7 +604,8 @@ static void countConfirmed(int& cadCount, int& fskCount, int& strongPending, int
 
 #ifndef BOARD_T3S3_LR1121
 
-static void switchToLoRa(SX1262& radio) {
+static void ensureLoRa(SX1262& radio) {
+    if (currentRadioMode == MODE_LORA) return;
     radio.standby();
     uint8_t loraType = RADIOLIB_SX126X_PACKET_TYPE_LORA;
     radioMod.SPIwriteStream(RADIOLIB_SX126X_CMD_SET_PACKET_TYPE, &loraType, 1);
@@ -606,9 +615,11 @@ static void switchToLoRa(SX1262& radio) {
     radio.setBandwidth(500.0);
     radio.setSyncWord(RADIOLIB_SX126X_SYNC_WORD_PRIVATE);
     radio.setPreambleLength(8);
+    currentRadioMode = MODE_LORA;
 }
 
-static void switchToFSK(SX1262& radio) {
+static void ensureFSK(SX1262& radio) {
+    if (currentRadioMode == MODE_GFSK) return;
     radio.standby();
     uint8_t fskType = RADIOLIB_SX126X_PACKET_TYPE_GFSK;
     radioMod.SPIwriteStream(RADIOLIB_SX126X_CMD_SET_PACKET_TYPE, &fskType, 1);
@@ -616,6 +627,7 @@ static void switchToFSK(SX1262& radio) {
     radio.setFrequencyDeviation(5.0);
     radio.setRxBandwidth(234.3);
     radio.setFrequency(860.0);
+    currentRadioMode = MODE_GFSK;
 }
 
 #endif
@@ -629,7 +641,8 @@ static void switchToFSK(SX1262& radio) {
 // Avoids the full hardware reset + recalibration that begin() triggers via
 // modSetup() → findChip() → reset(). Saves ~700ms per cycle.
 
-static void switchToLoRa_LR(LR1121_RSSI& radio) {
+static void ensureLoRa_LR(LR1121_RSSI& radio) {
+    if (currentRadioMode == MODE_LORA) return;
     radio.standby();
     radio.setPacketTypeDirect(RADIOLIB_LR11X0_PACKET_TYPE_LORA);
     radio.setBandwidth(500.0);
@@ -637,15 +650,18 @@ static void switchToLoRa_LR(LR1121_RSSI& radio) {
     radio.setCodingRate(5);
     radio.setSyncWord(RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE);
     radio.setPreambleLength(8);
+    currentRadioMode = MODE_LORA;
 }
 
-static void switchToGFSK_LR(LR1121_RSSI& radio) {
+static void ensureGFSK_LR(LR1121_RSSI& radio) {
+    if (currentRadioMode == MODE_GFSK) return;
     radio.standby();
     radio.setPacketTypeDirect(RADIOLIB_LR11X0_PACKET_TYPE_GFSK);
     radio.setBitRate(4.8);
     radio.setFrequencyDeviation(50.0);
     radio.setRxBandwidth(156.2);
     radio.setFrequency(SCAN_FREQ_START, true);
+    currentRadioMode = MODE_GFSK;
 }
 
 // 2.4 GHz channel helpers
@@ -672,7 +688,7 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
     fhssCycleAdvance();
 
     // ── Enter LoRa mode for CAD scanning ──────────────────────────────
-    switchToLoRa_LR(radio);
+    ensureLoRa_LR(radio);
 
     // ── PHASE 1: Priority re-check active sub-GHz LoRa taps ──────────
     for (int i = 0; i < MAX_TAPS; i++) {
@@ -758,6 +774,10 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
     }
 
     // ── PHASE 2a: Broad sub-GHz CAD scan — SF6-SF12 rotating channels ─
+    // Count confirmed taps FROM THIS CYCLE's Phase 1 hits so pursuit mode
+    // reacts on the same cycle the drone is first seen (was 1 cycle late).
+    countConfirmed(result.confirmedCadCount, result.confirmedFskCount,
+                   result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
     static bool lastPursuitMode = false;
     bool pursuitMode = (countDiversity(DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
                        || (result.confirmedCadCount > 0);
@@ -860,7 +880,11 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
         }
     }
 
-    // Broad 2.4 GHz scan — SF6/SF7/SF8 rotating
+    // Broad 2.4 GHz scan — SF6/SF7/SF8 rotating, every 3rd cycle only.
+    // Drone signals persist for seconds, not milliseconds, so per-cycle
+    // coverage isn't needed. Skipping 2 of 3 cycles saves ~280ms per skip.
+    // Active 2.4 GHz taps (re-checked above) still run every cycle.
+    if (cycleNum % 3 == 0) {
     SFScan sf24Scans[] = {
         { 6, CAD_24_SF6, ELRS_24_CHANNELS, &rot24SF6, elrs24Freq },
         { 7, CAD_24_SF7, ELRS_24_CHANNELS, &rot24SF7, elrs24Freq },
@@ -892,9 +916,10 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
             }
         }
     }
+    }
 
     // ── PHASE 4: Switch back to GFSK for RSSI sweep ──────────────────
-    switchToGFSK_LR(radio);
+    ensureGFSK_LR(radio);
 
     // ── PHASE 3: FSK Crossfire scan ──────────────────────────────────
     // Radio is in GFSK mode. Reconfigure for Crossfire 150 Hz detection.
@@ -1044,7 +1069,7 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     fhssCycleAdvance();
 
     // Switch from FSK to LoRa packet type via low-level SPI command
-    switchToLoRa(radio);
+    ensureLoRa(radio);
 
     // ── PHASE 1: Priority re-check active LoRa taps + adjacent channels ──
     for (int i = 0; i < MAX_TAPS; i++) {
@@ -1132,7 +1157,11 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     }
 
     // ── PHASE 2: Broad CAD scan — all SF values, rotating channels ──────
-    // Pursuit mode: when a drone is detected, focus on active SFs at max coverage
+    // Pursuit mode: when a drone is detected, focus on active SFs at max coverage.
+    // Count confirmed taps FROM THIS CYCLE's Phase 1 hits so pursuit mode reacts
+    // on the same cycle the drone is first seen (was 1 cycle late).
+    countConfirmed(result.confirmedCadCount, result.confirmedFskCount,
+                   result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
     static bool lastPursuitMode = false;
     bool pursuitMode = (countDiversity(DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
                        || (result.confirmedCadCount > 0);
@@ -1227,10 +1256,10 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     fhssFlushSpread();
 
     // ── PHASE 4: Switch back to FSK for next RSSI sweep ────────────────
-    switchToFSK(radio);
+    ensureFSK(radio);
 
     // ── PHASE 3: FSK Crossfire scan ────────────────────────────────────
-    // Runs AFTER switchToFSK() — radio is already in FSK mode.
+    // Runs AFTER ensureFSK() — radio is already in FSK mode.
     // This avoids the LoRa→FSK→LoRa sandwich that corrupted RadioLib
     // internal state. Sequence is now FSK→FSK(Crossfire)→FSK(RSSI).
     {
