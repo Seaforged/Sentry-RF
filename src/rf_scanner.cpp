@@ -2,6 +2,40 @@
 #include "board_config.h"
 #include "sentry_config.h"
 #include <Arduino.h>
+#include <algorithm>
+#include <cmath>
+
+// ── Adaptive Noise Floor (Phase 1.1) ───────────────────────────────────────
+// Dual-time-constant IIR on per-sweep median RSSI. -120 dBm at boot is a
+// conservative starting point — the fast-attack branch pulls it down to the
+// true environment median within 1-2 cycles, so detection is live from cycle 1.
+static float adaptiveNoiseFloor = -120.0f;
+static const float NF_ALPHA_FAST = 0.5f;   // median < floor  → drop quickly
+static const float NF_ALPHA_SLOW = 0.05f;  // median >= floor → rise slowly
+
+void computeAdaptiveNoiseFloor(const ScanResult& result) {
+    // nth_element is O(n) vs O(n log n) sort — we only need the median, not
+    // the sorted array. 350 floats on ESP32-S3 is ~50 µs, negligible vs sweep.
+    float tmp[SCAN_BIN_COUNT];
+    for (int i = 0; i < SCAN_BIN_COUNT; i++) tmp[i] = result.rssi[i];
+    std::nth_element(tmp, tmp + SCAN_BIN_COUNT / 2, tmp + SCAN_BIN_COUNT);
+    float median = tmp[SCAN_BIN_COUNT / 2];
+
+    if (!std::isfinite(median)) return;
+    if (!std::isfinite(adaptiveNoiseFloor)) adaptiveNoiseFloor = -120.0f;
+
+    if (median < adaptiveNoiseFloor) {
+        adaptiveNoiseFloor = NF_ALPHA_FAST * median + (1.0f - NF_ALPHA_FAST) * adaptiveNoiseFloor;
+    } else {
+        adaptiveNoiseFloor = NF_ALPHA_SLOW * median + (1.0f - NF_ALPHA_SLOW) * adaptiveNoiseFloor;
+    }
+
+    Serial.printf("[NF] adaptive=%.1f dBm (median=%.1f)\n", adaptiveNoiseFloor, median);
+}
+
+float getAdaptiveNoiseFloor() {
+    return adaptiveNoiseFloor;
+}
 
 // 10 test frequencies spread across 860-928 MHz for boot-time antenna check
 static const float ANTENNA_TEST_FREQS[] = {
@@ -86,6 +120,7 @@ void scannerSweep(LR1121_RSSI& radio, ScanResult& result) {
     }
 
     result.sweepTimeMs = millis() - startTime;
+    computeAdaptiveNoiseFloor(result);
 }
 
 bool scannerAntennaCheck(LR1121_RSSI& radio) {
@@ -205,6 +240,7 @@ void scannerSweep(SX1262& radio, ScanResult& result) {
     radio.standby();
 
     result.sweepTimeMs = millis() - startTime;
+    computeAdaptiveNoiseFloor(result);
 
     // Debug: check RSSI at key frequencies across the band
     Serial.printf("[SCAN-DBG] 860:%.0f 880:%.0f 900:%.0f 920:%.0f\n",

@@ -24,4 +24,7 @@ ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
 // Get the last computed confidence score (for logging/display)
 int detectionEngineGetScore();
 
+// Timestamp of the most recent detection event that scored ADVISORY or higher.
+uint32_t getLastDetectionMs();
+
 #endif // DETECTION_ENGINE_H

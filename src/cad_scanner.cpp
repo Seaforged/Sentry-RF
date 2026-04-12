@@ -1,4 +1,5 @@
 #include "cad_scanner.h"
+#include "rf_scanner.h"
 #include "board_config.h"
 #include <Arduino.h>
 #include <string.h>
@@ -115,6 +116,47 @@ static uint8_t ambientTapCount = 0;
 static uint16_t warmupCycleCount = 0;
 static bool warmupComplete = false;
 
+static uint16_t cadErrorsThisCycle = 0;
+static uint16_t cadProbesThisCycle = 0;
+static int16_t cadFirstError = 0;
+static bool cadHwFaultFlag = false;
+
+static inline bool isCadError(int16_t result) {
+    return result != RADIOLIB_LORA_DETECTED && result != RADIOLIB_CHANNEL_FREE;
+}
+
+static inline void countCadProbe(int16_t result) {
+    cadProbesThisCycle++;
+    if (isCadError(result)) {
+        if (cadErrorsThisCycle == 0) cadFirstError = result;
+        cadErrorsThisCycle++;
+    }
+}
+static uint8_t consecutiveFaultCycles = 0;
+static uint8_t consecutiveCleanCycles = 0;
+
+// Latest sub-GHz sweep result, captured at the top of cadFskScan() so the
+// adaptive-noise-floor filter in isWarmupAmbient() can look up the RSSI at
+// any hit frequency without threading an extra parameter through every call.
+// Valid only within a single cadFskScan() invocation.
+static const ScanResult* latestSweep = nullptr;
+
+// Adaptive-NF margin: a CAD hit whose sweep RSSI is within this many dB of
+// the current noise floor is treated as noise, not a real signal. 6 dB is the
+// wardragon-fpv-detect AUTO_THRESHOLD default — enough headroom to ignore
+// sweep-to-sweep jitter without masking weak drones at long range.
+static const float NF_AMBIENT_MARGIN_DB = 6.0f;
+
+// Look up the RSSI of `freq` in the latest RSSI sweep. Returns -200.0 if the
+// sweep isn't available yet (cold boot / RSSI cycle skipped) so callers that
+// fall back to "below floor" won't spuriously flag the hit as ambient.
+static float rssiAtFreq(float freq) {
+    if (!latestSweep) return -200.0f;
+    int bin = (int)roundf((freq - SCAN_FREQ_START) / SCAN_FREQ_STEP);
+    if (bin < 0 || bin >= SCAN_BIN_COUNT) return -200.0f;
+    return latestSweep->rssi[bin];
+}
+
 static bool isAmbientCadSource(float freq, uint8_t sf) {
     for (int i = 0; i < MAX_AMBIENT_TAPS; i++) {
         if (ambientTaps[i].active &&
@@ -138,8 +180,9 @@ static void recordAmbientTap(float freq, uint8_t sf, bool duringWarmup = false) 
     }
 }
 
-// Check if freq/SF was identified as ambient during the initial warmup period
-// (not auto-learned later). Used to filter diversity recording.
+// Hybrid ambient filter (Phase 1.1): a CAD hit is ambient if EITHER
+// (a) the tap list flagged it during warmup, OR
+// (b) its latest sweep RSSI is below adaptiveNoiseFloor + 6 dB.
 static bool isWarmupAmbient(float freq, uint8_t sf) {
     for (int i = 0; i < MAX_AMBIENT_TAPS; i++) {
         if (ambientTaps[i].active &&
@@ -148,6 +191,10 @@ static bool isWarmupAmbient(float freq, uint8_t sf) {
             fabsf(ambientTaps[i].frequency - freq) <= AMBIENT_FREQ_TOLERANCE) {
             return true;
         }
+    }
+    float rssi = rssiAtFreq(freq);
+    if (rssi < getAdaptiveNoiseFloor() + NF_AMBIENT_MARGIN_DB) {
+        return true;
     }
     return false;
 }
@@ -224,7 +271,7 @@ static void diversityCycleUpdate() {
     for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
         if (!diversitySlots[i].active) continue;
         if (diversitySlots[i].hitThisCycle) {
-            diversitySlots[i].consecutiveHits++;
+            if (diversitySlots[i].consecutiveHits < 255) diversitySlots[i].consecutiveHits++;
             diversitySlots[i].hitThisCycle = false;
         } else {
             diversitySlots[i].consecutiveHits = 0;
@@ -371,7 +418,6 @@ static uint8_t fhssCollectUnique(FhssHit* out, uint8_t outMax) {
 // Call after Phase 2a completes. If spread threshold crossed, pump each
 // non-ambient unique hit into recordDiversityHit(). Returns count fired.
 static uint8_t fhssFlushSpread() {
-    if (!warmupComplete) return 0;
     FhssHit uniq[FHSS_WINDOW_CYCLES * FHSS_MAX_HITS_PER_CYCLE];
     uint8_t uniqCount = fhssCollectUnique(uniq, sizeof(uniq) / sizeof(uniq[0]));
     if (uniqCount < FHSS_UNIQUE_THRESHOLD) return 0;
@@ -392,6 +438,10 @@ static uint8_t fhssFlushSpread() {
 
 bool cadWarmupComplete() {
     return warmupComplete;
+}
+
+bool cadHwFault() {
+    return cadHwFaultFlag;
 }
 
 void resetDiversityTracker() {
@@ -417,6 +467,12 @@ void cadScannerInit() {
     ambientTapCount = 0;
     warmupCycleCount = 0;
     warmupComplete = false;
+    cadHwFaultFlag = false;
+    cadErrorsThisCycle = 0;
+    cadProbesThisCycle = 0;
+    cadFirstError = 0;
+    consecutiveFaultCycles = 0;
+    consecutiveCleanCycles = 0;
     rotSF6 = rotSF7 = rotSF8 = rotSF9 = rotSF10 = rotSF11 = rotSF12 = rotFSK = 0;
 }
 
@@ -469,7 +525,7 @@ static CadTap* addFskTap(float freq) {
 }
 
 static void tapHit(CadTap* tap) {
-    tap->consecutiveHits++;
+    if (tap->consecutiveHits < 255) tap->consecutiveHits++;
     tap->missCount = 0;
     tap->lastSeenMs = millis();
 }
@@ -507,28 +563,21 @@ static void countConfirmed(int& cadCount, int& fskCount, int& strongPending, int
 #ifndef BOARD_T3S3_LR1121
 
 static void switchToLoRa(SX1262& radio) {
-    // Switch SX1262 from FSK to LoRa packet type via raw SPI command.
-    // CRITICAL: Must set ALL LoRa modem params (CR, sync word, preamble) after
-    // switching — RadioLib's internal state for these fields is zeroed after
-    // beginFSK(), and setSpreadingFactor/setBandwidth pass those zeroed values
-    // to setModulationParams(), resulting in invalid CAD configuration.
     radio.standby();
-    uint8_t loraType = 0x01;  // RADIOLIB_SX126X_PACKET_TYPE_LORA
-    radioMod.SPIwriteStream(0x8A, &loraType, 1);
+    uint8_t loraType = RADIOLIB_SX126X_PACKET_TYPE_LORA;
+    radioMod.SPIwriteStream(RADIOLIB_SX126X_CMD_SET_PACKET_TYPE, &loraType, 1);
 
-    // Set CR FIRST — this initializes codingRate internal state before SF/BW
-    // call setModulationParams() with it
-    radio.setCodingRate(5);          // CR 4/5 — sets this->codingRate = 1
-    radio.setSpreadingFactor(6);     // SF6 — now setModulationParams uses correct CR
-    radio.setBandwidth(500.0);       // BW500
-    radio.setSyncWord(RADIOLIB_SX126X_SYNC_WORD_PRIVATE);  // 0x12
+    radio.setCodingRate(5);
+    radio.setSpreadingFactor(6);
+    radio.setBandwidth(500.0);
+    radio.setSyncWord(RADIOLIB_SX126X_SYNC_WORD_PRIVATE);
     radio.setPreambleLength(8);
 }
 
 static void switchToFSK(SX1262& radio) {
     radio.standby();
-    uint8_t fskType = 0x00;  // RADIOLIB_SX126X_PACKET_TYPE_GFSK
-    radioMod.SPIwriteStream(0x8A, &fskType, 1);
+    uint8_t fskType = RADIOLIB_SX126X_PACKET_TYPE_GFSK;
+    radioMod.SPIwriteStream(RADIOLIB_SX126X_CMD_SET_PACKET_TYPE, &fskType, 1);
     radio.setBitRate(4.8);
     radio.setFrequencyDeviation(5.0);
     radio.setRxBandwidth(234.3);
@@ -570,6 +619,10 @@ static uint32_t rot24SF8 = 0;
 
 CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult* rssi) {
     CadFskResult result = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    latestSweep = rssi;
+    cadErrorsThisCycle = 0;
+    cadProbesThisCycle = 0;
+    cadFirstError = 0;
 
     diversityCycleUpdate();
     pruneExpiredDiversity();
@@ -585,9 +638,11 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
         radio.setSpreadingFactor(tapList[i].sf);
         ChannelScanConfig_t cfg = buildCadConfigLR(tapList[i].sf);
         radio.setFrequency(tapList[i].frequency);
-        if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
+        int16_t cadResult = radio.scanChannel(cfg);
+        countCadProbe(cadResult);
+        if (cadResult == RADIOLIB_LORA_DETECTED) {
             tapHit(&tapList[i]);
-            if (warmupComplete && tapList[i].consecutiveHits >= 2 &&
+            if (tapList[i].consecutiveHits >= 2 &&
                 !isWarmupAmbient(tapList[i].frequency, tapList[i].sf))
                 recordDiversityHit(tapList[i].frequency, tapList[i].sf);
         } else {
@@ -598,9 +653,11 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
                 float adjFreq = tapList[i].frequency + delta;
                 if (adjFreq >= 902.0f && adjFreq <= 928.0f) {
                     radio.setFrequency(adjFreq);
-                    if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
+                    int16_t adjResult = radio.scanChannel(cfg);
+                    countCadProbe(adjResult);
+                    if (adjResult == RADIOLIB_LORA_DETECTED) {
                         tapHit(&tapList[i]);
-                        if (warmupComplete && tapList[i].consecutiveHits >= 2 &&
+                        if (tapList[i].consecutiveHits >= 2 &&
                             !isWarmupAmbient(adjFreq, tapList[i].sf))
                             recordDiversityHit(adjFreq, tapList[i].sf);
                         adjHit = true;
@@ -639,16 +696,17 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
             if (rssi->rssi[bin] > thresh) {
                 float freq = SCAN_FREQ_START + (bin * SCAN_FREQ_STEP);
                 radio.setFrequency(freq);
-                if (radio.scanChannel(cfg6) == RADIOLIB_LORA_DETECTED) {
+                int16_t cadResult = radio.scanChannel(cfg6);
+                countCadProbe(cadResult);
+                if (cadResult == RADIOLIB_LORA_DETECTED) {
                     CadTap* existing = findTap(freq, 6);
                     if (existing) {
                         tapHit(existing);
-                        if (warmupComplete && existing->consecutiveHits >= 2 &&
+                        if (existing->consecutiveHits >= 2 &&
                             !isWarmupAmbient(freq, 6))
                             recordDiversityHit(freq, 6);
                     } else {
                         addTap(freq, 6, BAND_SUB_GHZ);
-                        // New tap starts at consecutiveHits=1 — no diversity yet
                     }
                 }
                 guidedScans++;
@@ -712,16 +770,14 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
             float freq = sc.fn(ch);
             radio.setFrequency(freq);
 
-            if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
+            int16_t cadResult = radio.scanChannel(cfg);
+            countCadProbe(cadResult);
+            if (cadResult == RADIOLIB_LORA_DETECTED) {
                 CadTap* existing = findTap(freq, sc.sf);
                 if (!existing) addTap(freq, sc.sf, BAND_SUB_GHZ);
-                // Match SX1262: don't tapHit in Phase 2 broad scan (already done in Phase 1).
-                // Only existing taps with 2+ consecutive hits contribute to diversity.
-                if (existing && warmupComplete && existing->consecutiveHits >= 2 &&
+                if (existing && existing->consecutiveHits >= 2 &&
                     !isWarmupAmbient(freq, sc.sf))
                     recordDiversityHit(freq, sc.sf);
-                // FHSS spread path: feed every hit into the rolling window.
-                // Non-ambient filter + threshold check happens in fhssFlushSpread().
                 fhssRecordHit(freq, sc.sf);
             }
         }
@@ -750,9 +806,11 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
         radio.setSpreadingFactor(tapList[i].sf);
         ChannelScanConfig_t cfg24 = buildCadConfigLR(tapList[i].sf);
         radio.setFrequency(tapList[i].frequency);
-        if (radio.scanChannel(cfg24) == RADIOLIB_LORA_DETECTED) {
+        int16_t cadResult = radio.scanChannel(cfg24);
+        countCadProbe(cadResult);
+        if (cadResult == RADIOLIB_LORA_DETECTED) {
             tapHit(&tapList[i]);
-            if (warmupComplete && tapList[i].consecutiveHits >= 2)
+            if (tapList[i].consecutiveHits >= 2)
                 recordDiversityHit(tapList[i].frequency, tapList[i].sf);
         } else {
             tapMiss(&tapList[i]);
@@ -781,11 +839,12 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
             float freq = sc.fn(ch);
             radio.setFrequency(freq);
 
-            if (radio.scanChannel(cfg24b) == RADIOLIB_LORA_DETECTED) {
+            int16_t cadResult = radio.scanChannel(cfg24b);
+            countCadProbe(cadResult);
+            if (cadResult == RADIOLIB_LORA_DETECTED) {
                 CadTap* existing = findTap(freq, sc.sf);
                 if (!existing) addTap(freq, sc.sf, BAND_2G4);
-                // Match Phase 2a behavior: no tapHit (done in Phase 2b re-check above)
-                if (existing && warmupComplete && existing->consecutiveHits >= 2)
+                if (existing && existing->consecutiveHits >= 2)
                     recordDiversityHit(freq, sc.sf);
             }
         }
@@ -900,6 +959,22 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
         }
     }
 
+    if (cadErrorsThisCycle > 0) {
+        Serial.printf("[CAD] %u/%u probes returned errors (first=%d)\n", cadErrorsThisCycle, cadProbesThisCycle, cadFirstError);
+    }
+    {
+        bool faultThisCycle = (cadProbesThisCycle > 0) && (cadErrorsThisCycle > cadProbesThisCycle / 2);
+        if (faultThisCycle) {
+            consecutiveCleanCycles = 0;
+            if (consecutiveFaultCycles < 255) consecutiveFaultCycles++;
+            if (consecutiveFaultCycles >= 3) cadHwFaultFlag = true;
+        } else {
+            consecutiveFaultCycles = 0;
+            if (consecutiveCleanCycles < 255) consecutiveCleanCycles++;
+            if (consecutiveCleanCycles >= 3) cadHwFaultFlag = false;
+        }
+    }
+
     countConfirmed(result.confirmedCadCount, result.confirmedFskCount,
                    result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
     result.diversityCount = countDiversity(DIVERSITY_WINDOW_MS);
@@ -914,6 +989,9 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
 
 CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi) {
     CadFskResult result = {0, 0, 0, 0, 0, 0, 0, 0};
+    latestSweep = rssi;
+    cadErrorsThisCycle = 0;
+    cadProbesThisCycle = 0;
 
     // Update persistence counters from previous cycle's hits, then clear flags
     diversityCycleUpdate();
@@ -932,9 +1010,11 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
         radio.setSpreadingFactor(tapList[i].sf);
         ChannelScanConfig_t cfg = buildCadConfig(tapList[i].sf);
         radio.setFrequency(tapList[i].frequency);
-        if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
+        int16_t cadResult = radio.scanChannel(cfg);
+        countCadProbe(cadResult);
+        if (cadResult == RADIOLIB_LORA_DETECTED) {
             tapHit(&tapList[i]);
-            if (warmupComplete && tapList[i].consecutiveHits >= 2 &&
+            if (tapList[i].consecutiveHits >= 2 &&
                 !isWarmupAmbient(tapList[i].frequency, tapList[i].sf))
                 recordDiversityHit(tapList[i].frequency, tapList[i].sf);
         } else {
@@ -944,9 +1024,11 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                 float adjFreq = tapList[i].frequency + delta;
                 if (adjFreq >= 902.0f && adjFreq <= 928.0f) {
                     radio.setFrequency(adjFreq);
-                    if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
+                    int16_t adjResult = radio.scanChannel(cfg);
+                    countCadProbe(adjResult);
+                    if (adjResult == RADIOLIB_LORA_DETECTED) {
                         tapHit(&tapList[i]);
-                        if (warmupComplete && tapList[i].consecutiveHits >= 2 &&
+                        if (tapList[i].consecutiveHits >= 2 &&
                             !isWarmupAmbient(adjFreq, tapList[i].sf))
                             recordDiversityHit(adjFreq, tapList[i].sf);
                         adjHit = true;
@@ -988,11 +1070,13 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
             if (rssi->rssi[bin] > thresh) {
                 float freq = SCAN_FREQ_START + (bin * SCAN_FREQ_STEP);
                 radio.setFrequency(freq);
-                if (radio.scanChannel(cfg6) == RADIOLIB_LORA_DETECTED) {
+                int16_t cadResult = radio.scanChannel(cfg6);
+                countCadProbe(cadResult);
+                if (cadResult == RADIOLIB_LORA_DETECTED) {
                     CadTap* existing = findTap(freq, 6);
                     if (existing) {
                         tapHit(existing);
-                        if (warmupComplete && existing->consecutiveHits >= 2 &&
+                        if (existing->consecutiveHits >= 2 &&
                             !isWarmupAmbient(freq, 6))
                             recordDiversityHit(freq, 6);
                     } else {
@@ -1083,15 +1167,14 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
             float freq = sc.fn(ch);
             radio.setFrequency(freq);
 
-            if (radio.scanChannel(cfg) == RADIOLIB_LORA_DETECTED) {
+            int16_t cadResult = radio.scanChannel(cfg);
+            countCadProbe(cadResult);
+            if (cadResult == RADIOLIB_LORA_DETECTED) {
                 CadTap* existing = findTap(freq, sc.sf);
                 if (!existing) addTap(freq, sc.sf);
-                // Only record diversity if existing tap already has 2+ consecutive hits.
-                // New taps (just created above) start at 1, excluded by this check.
-                if (existing && warmupComplete && existing->consecutiveHits >= 2 &&
+                if (existing && existing->consecutiveHits >= 2 &&
                     !isWarmupAmbient(freq, sc.sf))
                     recordDiversityHit(freq, sc.sf);
-                // FHSS spread path: feed every hit into the rolling window.
                 fhssRecordHit(freq, sc.sf);
             }
         }
@@ -1216,6 +1299,22 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
             if (tapList[i].active) {
                 tapList[i].isAmbient = isAmbientCadSource(tapList[i].frequency, tapList[i].sf);
             }
+        }
+    }
+
+    if (cadErrorsThisCycle > 0) {
+        Serial.printf("[CAD] %u/%u probes returned errors (first=%d)\n", cadErrorsThisCycle, cadProbesThisCycle, cadFirstError);
+    }
+    {
+        bool faultThisCycle = (cadProbesThisCycle > 0) && (cadErrorsThisCycle > cadProbesThisCycle / 2);
+        if (faultThisCycle) {
+            consecutiveCleanCycles = 0;
+            if (consecutiveFaultCycles < 255) consecutiveFaultCycles++;
+            if (consecutiveFaultCycles >= 3) cadHwFaultFlag = true;
+        } else {
+            consecutiveFaultCycles = 0;
+            if (consecutiveCleanCycles < 255) consecutiveCleanCycles++;
+            if (consecutiveCleanCycles >= 3) cadHwFaultFlag = false;
         }
     }
 

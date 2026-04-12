@@ -63,4 +63,11 @@ bool scannerAntennaCheck(SX1262& radio);
 void scannerPrintCSV(const ScanResult& result);
 void scannerPrintSummary(const ScanResult& result);
 
+// Adaptive noise floor (Phase 1.1) — IIR with asymmetric time constants on the
+// per-sweep median RSSI. Fast attack (α=0.5) when environment quiets, slow
+// decay (α=0.05) when it rises so real signals don't drag the floor upward.
+// Initialized to -120 dBm; called by scannerSweep() after each sweep completes.
+void computeAdaptiveNoiseFloor(const ScanResult& result);
+float getAdaptiveNoiseFloor();
+
 #endif // RF_SCANNER_H

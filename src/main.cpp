@@ -189,7 +189,12 @@ static void loRaScanTask(void* param) {
         }
 
         // Log to SD/SPIFFS
-        loggerWrite(systemState, sweepNum++);
+        SystemState logSnapshot;
+        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10))) {
+            logSnapshot = systemState;
+            xSemaphoreGive(stateMutex);
+        }
+        loggerWrite(logSnapshot, sweepNum++);
 
         unsigned long cycleEnd = millis();
 

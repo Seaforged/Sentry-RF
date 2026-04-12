@@ -2,6 +2,8 @@
 #include "board_config.h"
 #include "alert_handler.h"
 #include "buzzer_manager.h"
+#include "cad_scanner.h"
+#include "detection_engine.h"
 #include "gps_manager.h"
 #include "version.h"
 #include "splash_logo.h"
@@ -554,6 +556,12 @@ void screenThreat(Adafruit_SSD1306& disp, const SystemState& state, int page) {
         disp.print("Bearing: --");
     }
 
+    if (state.threatLevel >= THREAT_ADVISORY && getLastDetectionMs() > 0) {
+        uint32_t ago = (millis() - getLastDetectionMs()) / 1000;
+        disp.setCursor(0, 52);
+        disp.printf("LAST: %lus ago", ago);
+    }
+
     drawPageDots(disp, page, NUM_SCREENS);
     disp.display();
 }
@@ -585,6 +593,11 @@ void screenSystem(Adafruit_SSD1306& disp, const SystemState& state, int page) {
              buzzerStateStr(),
              state.compass.valid ? "OK" : "--");
     disp.print(buf);
+
+    if (cadHwFault()) {
+        disp.setCursor(0, 52);
+        disp.print("CAD: HW FAULT");
+    }
 
     drawPageDots(disp, page, NUM_SCREENS);
     disp.display();

@@ -100,7 +100,7 @@ static const uint8_t DIVERSITY_VELOCITY_BONUS_PTS = 10;   // bonus confidence po
 // escalation logic applies. Addresses FHSS-invisibility regression found
 // during JJ v2.0.0 real-signal testing 2026-04-11.
 static const uint8_t FHSS_WINDOW_CYCLES    = 3;     // rolling window size
-static const uint8_t FHSS_UNIQUE_THRESHOLD = 4;     // min unique freqs to fire
+static const uint8_t FHSS_UNIQUE_THRESHOLD = 3;     // min unique freqs to fire (lowered from 4 for narrow-hop protocols like mLRS)
 
 // ── RSSI Ambient Filter ──────────────────────────────────────────────
 static const int   AMBIENT_HISTORY_DEPTH   = 10;    // sweeps of history before baseline

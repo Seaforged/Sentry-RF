@@ -104,6 +104,7 @@ static void updateBandEnergy(const float* rssi) {
 
 static ThreatLevel currentThreat = THREAT_CLEAR;
 static unsigned long lastThreatEventMs = 0;
+static uint32_t lastDetectionMs = 0;
 // COOLDOWN_MS from sentry_config.h
 static int cleanCycleCount = 0;
 static unsigned long clearSinceMs = 0;
@@ -520,8 +521,15 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
 
     // Cross-domain: WiFi Remote ID (set by wifiScanTask via systemState)
     // Consider RID "active" if detected within the last 10 seconds
-    if (systemState.remoteIdDetected &&
-        (millis() - systemState.remoteIdLastMs) < 10000) {
+    bool ridDetected = false;
+    unsigned long ridLastMs = 0;
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(5))) {
+        ridDetected = systemState.remoteIdDetected;
+        ridLastMs = systemState.remoteIdLastMs;
+        xSemaphoreGive(stateMutex);
+    }
+    if (ridDetected &&
+        (millis() - ridLastMs) < 10000) {
         score += WEIGHT_REMOTE_ID;
     }
 
@@ -533,7 +541,12 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     else if (score >= SCORE_WARNING) desired = THREAT_WARNING;
     else if (score >= SCORE_ADVISORY) desired = THREAT_ADVISORY;
 
-    // Warmup guard — both RSSI and CAD warmups must complete
+    if (desired >= THREAT_ADVISORY) lastDetectionMs = millis();
+
+    // Soft warmup gate: detection is live from cycle 1 (ADVISORY can fire
+    // immediately) but WARNING/CRITICAL are suppressed until both filters
+    // finish learning. This prevents false high-severity alerts during the
+    // first ~10s while the adaptive noise floor converges.
     static bool postWarmupReset = false;
     bool warmupActive = !ambientFilterReady() || !cadWarmupComplete();
     if (warmupActive) {
@@ -664,6 +677,8 @@ void detectionEngineInit() {
 }
 
 int detectionEngineGetScore() { return (lastScore > 100) ? 100 : lastScore; }
+
+uint32_t getLastDetectionMs() { return lastDetectionMs; }
 
 void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad,
                               int activeTaps, int diversityCount,
