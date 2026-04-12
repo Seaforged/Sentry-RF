@@ -136,7 +136,7 @@ static uint8_t consecutiveFaultCycles = 0;
 static uint8_t consecutiveCleanCycles = 0;
 
 // Latest sub-GHz sweep result, captured at the top of cadFskScan() so the
-// adaptive-noise-floor filter in isWarmupAmbient() can look up the RSSI at
+// adaptive-noise-floor filter in isAmbientFrequency() can look up the RSSI at
 // any hit frequency without threading an extra parameter through every call.
 // Valid only within a single cadFskScan() invocation.
 static const ScanResult* latestSweep = nullptr;
@@ -180,13 +180,12 @@ static void recordAmbientTap(float freq, uint8_t sf, bool duringWarmup = false) 
     }
 }
 
-// Hybrid ambient filter (Phase 1.1): a CAD hit is ambient if EITHER
-// (a) the tap list flagged it during warmup, OR
+// Hybrid ambient filter: a CAD hit is ambient if EITHER
+// (a) any ambient tap (warmup or auto-learned) matches, OR
 // (b) its latest sweep RSSI is below adaptiveNoiseFloor + 6 dB.
-static bool isWarmupAmbient(float freq, uint8_t sf) {
+static bool isAmbientFrequency(float freq, uint8_t sf) {
     for (int i = 0; i < MAX_AMBIENT_TAPS; i++) {
         if (ambientTaps[i].active &&
-            ambientTaps[i].learnedDuringWarmup &&
             ambientTaps[i].sf == sf &&
             fabsf(ambientTaps[i].frequency - freq) <= AMBIENT_FREQ_TOLERANCE) {
             return true;
@@ -423,7 +422,7 @@ static uint8_t fhssFlushSpread() {
     if (uniqCount < FHSS_UNIQUE_THRESHOLD) return 0;
     uint8_t fired = 0;
     for (uint8_t i = 0; i < uniqCount; i++) {
-        if (isWarmupAmbient(uniq[i].freq, uniq[i].sf)) continue;
+        if (isAmbientFrequency(uniq[i].freq, uniq[i].sf)) continue;
         recordDiversityHit(uniq[i].freq, uniq[i].sf);
         fired++;
     }
@@ -643,7 +642,7 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
         if (cadResult == RADIOLIB_LORA_DETECTED) {
             tapHit(&tapList[i]);
             if (tapList[i].consecutiveHits >= 2 &&
-                !isWarmupAmbient(tapList[i].frequency, tapList[i].sf))
+                !isAmbientFrequency(tapList[i].frequency, tapList[i].sf))
                 recordDiversityHit(tapList[i].frequency, tapList[i].sf);
         } else {
             // Adjacent channel check
@@ -658,7 +657,7 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
                     if (adjResult == RADIOLIB_LORA_DETECTED) {
                         tapHit(&tapList[i]);
                         if (tapList[i].consecutiveHits >= 2 &&
-                            !isWarmupAmbient(adjFreq, tapList[i].sf))
+                            !isAmbientFrequency(adjFreq, tapList[i].sf))
                             recordDiversityHit(adjFreq, tapList[i].sf);
                         adjHit = true;
                         break;
@@ -703,7 +702,7 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
                     if (existing) {
                         tapHit(existing);
                         if (existing->consecutiveHits >= 2 &&
-                            !isWarmupAmbient(freq, 6))
+                            !isAmbientFrequency(freq, 6))
                             recordDiversityHit(freq, 6);
                     } else {
                         addTap(freq, 6, BAND_SUB_GHZ);
@@ -776,7 +775,7 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
                 CadTap* existing = findTap(freq, sc.sf);
                 if (!existing) addTap(freq, sc.sf, BAND_SUB_GHZ);
                 if (existing && existing->consecutiveHits >= 2 &&
-                    !isWarmupAmbient(freq, sc.sf))
+                    !isAmbientFrequency(freq, sc.sf))
                     recordDiversityHit(freq, sc.sf);
                 fhssRecordHit(freq, sc.sf);
             }
@@ -1015,7 +1014,7 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
         if (cadResult == RADIOLIB_LORA_DETECTED) {
             tapHit(&tapList[i]);
             if (tapList[i].consecutiveHits >= 2 &&
-                !isWarmupAmbient(tapList[i].frequency, tapList[i].sf))
+                !isAmbientFrequency(tapList[i].frequency, tapList[i].sf))
                 recordDiversityHit(tapList[i].frequency, tapList[i].sf);
         } else {
             bool adjHit = false;
@@ -1029,7 +1028,7 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                     if (adjResult == RADIOLIB_LORA_DETECTED) {
                         tapHit(&tapList[i]);
                         if (tapList[i].consecutiveHits >= 2 &&
-                            !isWarmupAmbient(adjFreq, tapList[i].sf))
+                            !isAmbientFrequency(adjFreq, tapList[i].sf))
                             recordDiversityHit(adjFreq, tapList[i].sf);
                         adjHit = true;
                         break;
@@ -1077,7 +1076,7 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                     if (existing) {
                         tapHit(existing);
                         if (existing->consecutiveHits >= 2 &&
-                            !isWarmupAmbient(freq, 6))
+                            !isAmbientFrequency(freq, 6))
                             recordDiversityHit(freq, 6);
                     } else {
                         addTap(freq, 6);
@@ -1173,7 +1172,7 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                 CadTap* existing = findTap(freq, sc.sf);
                 if (!existing) addTap(freq, sc.sf);
                 if (existing && existing->consecutiveHits >= 2 &&
-                    !isWarmupAmbient(freq, sc.sf))
+                    !isAmbientFrequency(freq, sc.sf))
                     recordDiversityHit(freq, sc.sf);
                 fhssRecordHit(freq, sc.sf);
             }

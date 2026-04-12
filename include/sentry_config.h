@@ -66,7 +66,7 @@ static const int CRSF_CHANNELS     = 100;   // 260 kHz spacing
 // ── Ambient Warmup Filter ─────────────────────────────────────────────
 static const unsigned long AMBIENT_WARMUP_MS      = 50000;  // ms warmup time
 static const unsigned long AMBIENT_EARLY_EXIT_MS  = 20000;  // ms minimum before early exit
-static const int   MAX_AMBIENT_TAPS               = 32;     // max ambient tap entries
+static const int   MAX_AMBIENT_TAPS               = 64;     // max ambient tap entries (32→64: LR1121 fills 32 during warmup)
 static const float AMBIENT_FREQ_TOLERANCE         = 0.2f;   // +/-MHz match window
 static const unsigned long AMBIENT_AUTOLEARN_MS   = 15000;  // ms before confirmed tap auto-learned (was 60s)
 
