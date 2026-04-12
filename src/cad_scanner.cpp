@@ -429,29 +429,41 @@ static uint8_t fhssCollectUnique(FhssHit* out, uint8_t outMax) {
     return n;
 }
 
-// Call after Phase 2a completes. Fire only if enough NON-AMBIENT unique
-// frequencies appear — that's the temporal discriminator. Infrastructure
-// produces many ambient-frequency hits but zero non-ambient ones. An FHSS
-// drone produces hits on channels outside the ambient list's coverage.
-// When triggered, ALL unique hits (including ambient-frequency ones) feed
-// diversity, because the drone's ambient-overlapping hits are real too.
+// Call after Phase 2a completes. Uses a baseline-delta discriminator: track
+// the steady-state unique-frequency count from infrastructure, then only fire
+// when the count INCREASES by FHSS_UNIQUE_THRESHOLD — indicating new FHSS
+// activity on top of the existing environment. This scales regardless of how
+// many infrastructure channels exist.
 static uint8_t fhssFlushSpread() {
+    static uint8_t baselineFhssUnique = 0;
+    static bool baselineSet = false;
+
     FhssHit uniq[FHSS_WINDOW_CYCLES * FHSS_MAX_HITS_PER_CYCLE];
     uint8_t uniqCount = fhssCollectUnique(uniq, sizeof(uniq) / sizeof(uniq[0]));
-    if (uniqCount < FHSS_UNIQUE_THRESHOLD) return 0;
-    uint8_t nonAmbientCount = 0;
-    for (uint8_t i = 0; i < uniqCount; i++) {
-        if (!isAmbientFrequency(uniq[i].freq, uniq[i].sf)) nonAmbientCount++;
+
+    if (!baselineSet && warmupComplete) {
+        baselineFhssUnique = uniqCount;
+        baselineSet = true;
+        return 0;
     }
-    if (nonAmbientCount == 0) return 0;
+    if (!baselineSet) return 0;
+
+    // Update baseline: fast drop when environment quiets, stable when steady
+    if (uniqCount <= baselineFhssUnique) {
+        baselineFhssUnique = uniqCount;
+    }
+
+    // Only fire when unique count exceeds baseline by threshold
+    if (uniqCount < baselineFhssUnique + FHSS_UNIQUE_THRESHOLD) return 0;
+
     uint8_t fired = 0;
     for (uint8_t i = 0; i < uniqCount; i++) {
         recordDiversityHit(uniq[i].freq, uniq[i].sf);
         fired++;
     }
     if (fired > 0) {
-        Serial.printf("[FHSS-SPREAD] %u unique / %u cycles -> diversity fired\n",
-                      uniqCount, FHSS_WINDOW_CYCLES);
+        Serial.printf("[FHSS-SPREAD] %u unique (baseline=%u) -> diversity fired\n",
+                      uniqCount, baselineFhssUnique);
     }
     return fired;
 }
@@ -612,19 +624,28 @@ static void switchToFSK(SX1262& radio) {
 
 #ifdef BOARD_T3S3_LR1121
 
-// ── LR1121 mode switching — full begin()/beginGFSK() calls ─────────────────
-// LR1121 RadioLib driver doesn't support raw SPI packet type switching.
-// Must use the derived class begin() with all params each time.
+// ── LR1121 mode switching — lightweight packet-type switch ────────────────
+// Uses setPacketType + parameter setters instead of begin()/beginGFSK().
+// Avoids the full hardware reset + recalibration that begin() triggers via
+// modSetup() → findChip() → reset(). Saves ~700ms per cycle.
 
 static void switchToLoRa_LR(LR1121_RSSI& radio) {
-    radio.begin(915.0, 500.0, 6, 5,
-                RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE, 10, 8, LR1121_TCXO_VOLTAGE);
+    radio.standby();
+    radio.setPacketTypeDirect(RADIOLIB_LR11X0_PACKET_TYPE_LORA);
+    radio.setBandwidth(500.0);
+    radio.setSpreadingFactor(6);
+    radio.setCodingRate(5);
+    radio.setSyncWord(RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE);
+    radio.setPreambleLength(8);
 }
 
 static void switchToGFSK_LR(LR1121_RSSI& radio) {
-    radio.beginGFSK(915.0, 4.8, 50.0, 156.2, 10, 16, LR1121_TCXO_VOLTAGE);
-    radio.setFrequency(SCAN_FREQ_START);
-    radio.setRxBoostedGainMode(true);
+    radio.standby();
+    radio.setPacketTypeDirect(RADIOLIB_LR11X0_PACKET_TYPE_GFSK);
+    radio.setBitRate(4.8);
+    radio.setFrequencyDeviation(50.0);
+    radio.setRxBandwidth(156.2);
+    radio.setFrequency(SCAN_FREQ_START, true);
 }
 
 // 2.4 GHz channel helpers

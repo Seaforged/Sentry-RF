@@ -696,11 +696,12 @@ void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad,
 
 ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
                                   const IntegrityStatus& integrity,
-                                  const ScanResult24* scan24) {
-    ambientFilterUpdate(scan);
-
-    // Band energy trending — detect aggregate FHSS energy in 902-928 MHz
-    updateBandEnergy(scan.rssi);
+                                  const ScanResult24* scan24,
+                                  bool freshRssi) {
+    if (freshRssi) {
+        ambientFilterUpdate(scan);
+        updateBandEnergy(scan.rssi);
+    }
 
     // Sub-GHz RSSI pipeline
     float noiseFloor = computeNoiseFloor(scan.rssi, SCAN_BIN_COUNT);

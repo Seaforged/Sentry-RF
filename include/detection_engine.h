@@ -19,7 +19,8 @@ void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad =
 // Called from loRaScanTask after each sweep. NOT thread-safe — single caller only.
 ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
                                   const IntegrityStatus& integrity,
-                                  const ScanResult24* scan24 = nullptr);
+                                  const ScanResult24* scan24 = nullptr,
+                                  bool freshRssi = false);
 
 // Get the last computed confidence score (for logging/display)
 int detectionEngineGetScore();

@@ -47,6 +47,9 @@ public:
         getRssiInst(&rssi);
         return rssi;
     }
+    int16_t setPacketTypeDirect(uint8_t type) {
+        return setPacketType(type);
+    }
 };
 
 int scannerInit(LR1121_RSSI& radio);

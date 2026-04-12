@@ -103,13 +103,13 @@ static const char* threatLevelStr(ThreatLevel t) {
 
 // Core 1 — LoRa SPI is only touched here, no mutex needed for the radio
 static void loRaScanTask(void* param) {
-    ScanResult localResult;
+    ScanResult localResult = {};
     GpsData snapGps = {};
     IntegrityStatus snapIntegrity = {};
     uint32_t sweepNum = 0;
     uint32_t cycleCount = 0;
 #ifdef BOARD_T3S3_LR1121
-    ScanResult24 local24;
+    ScanResult24 local24 = {};
 #endif
 
     // ── Main scan loop ────────────────────────────────────────────────────
@@ -138,11 +138,11 @@ static void loRaScanTask(void* param) {
             xSemaphoreGive(stateMutex);
         }
 
-        // Evaluate threat immediately with CAD results + last RSSI data
+        // Evaluate threat with CAD results + last RSSI data (not fresh)
 #ifdef BOARD_T3S3_LR1121
-        ThreatLevel threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity, &local24);
+        ThreatLevel threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity, &local24, false);
 #else
-        ThreatLevel threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity);
+        ThreatLevel threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity, nullptr, false);
 #endif
 
         // Store threat + CAD results into shared state
@@ -178,9 +178,9 @@ static void loRaScanTask(void* param) {
 
             // Re-assess with fresh RSSI data
 #ifdef BOARD_T3S3_LR1121
-            threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity, &local24);
+            threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity, &local24, true);
 #else
-            threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity);
+            threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity, nullptr, true);
 #endif
             if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 systemState.threatLevel = threat;
