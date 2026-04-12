@@ -58,13 +58,28 @@ static ChannelScanConfig_t buildCadConfig(uint8_t sf) {
 // fields so the driver picks the right values from its internal table, and
 // explicitly request 4 CAD symbols (raw count — LR11x0 does NOT use the
 // SX126X_CAD_ON_N_SYMB enum encoding).
-static ChannelScanConfig_t buildCadConfigLR(uint8_t /*sf*/) {
+static ChannelScanConfig_t buildCadConfigLR(uint8_t sf) {
+    // LR1121-specific CAD params. DetPeak values lowered from RadioLib defaults
+    // (which the author marked "TODO probably suboptimal") for higher detection
+    // sensitivity on short implicit-header ELRS packets. The FHSS spread tracker
+    // and ambient filter handle any additional false CAD hits downstream.
+    // Scale: LR11x0 detPeak range is ~43-72 (vs SX126x 19-29).
+    static const uint8_t detPeakLR[] = {
+        45,  // SF6  — primary ELRS 200Hz (default was 48)
+        49,  // SF7  — ELRS 150Hz, mLRS 31Hz (default was 50)
+        54,  // SF8  — ELRS 100Hz (default was 55)
+        52,  // SF9  — ELRS 50Hz (default was 55)
+        56,  // SF10 (default was 59)
+        60,  // SF11 — mLRS 19Hz (default was 61)
+        72,  // SF12 — needs higher per AN1200.48 (default was 65)
+    };
+    uint8_t idx = (sf >= 6 && sf <= 12) ? sf - 6 : 0;
     ChannelScanConfig_t cfg = {
         .cad = {
-            .symNum  = 4,       // 4 CAD symbols (raw count on LR11x0)
-            .detPeak = 0xFF,    // RADIOLIB_LR11X0_CAD_PARAM_DEFAULT → per-SF table
-            .detMin  = 0xFF,    // RADIOLIB_LR11X0_CAD_PARAM_DEFAULT → 10
-            .exitMode = 0xFF,   // RADIOLIB_LR11X0_CAD_PARAM_DEFAULT → STBY_RC
+            .symNum  = 4,
+            .detPeak = detPeakLR[idx],
+            .detMin  = 10,
+            .exitMode = 0,
             .timeout = 0,
             .irqFlags = RADIOLIB_IRQ_CAD_DEFAULT_FLAGS,
             .irqMask = RADIOLIB_IRQ_CAD_DEFAULT_MASK,
@@ -414,15 +429,23 @@ static uint8_t fhssCollectUnique(FhssHit* out, uint8_t outMax) {
     return n;
 }
 
-// Call after Phase 2a completes. If spread threshold crossed, pump each
-// non-ambient unique hit into recordDiversityHit(). Returns count fired.
+// Call after Phase 2a completes. Fire only if enough NON-AMBIENT unique
+// frequencies appear — that's the temporal discriminator. Infrastructure
+// produces many ambient-frequency hits but zero non-ambient ones. An FHSS
+// drone produces hits on channels outside the ambient list's coverage.
+// When triggered, ALL unique hits (including ambient-frequency ones) feed
+// diversity, because the drone's ambient-overlapping hits are real too.
 static uint8_t fhssFlushSpread() {
     FhssHit uniq[FHSS_WINDOW_CYCLES * FHSS_MAX_HITS_PER_CYCLE];
     uint8_t uniqCount = fhssCollectUnique(uniq, sizeof(uniq) / sizeof(uniq[0]));
     if (uniqCount < FHSS_UNIQUE_THRESHOLD) return 0;
+    uint8_t nonAmbientCount = 0;
+    for (uint8_t i = 0; i < uniqCount; i++) {
+        if (!isAmbientFrequency(uniq[i].freq, uniq[i].sf)) nonAmbientCount++;
+    }
+    if (nonAmbientCount == 0) return 0;
     uint8_t fired = 0;
     for (uint8_t i = 0; i < uniqCount; i++) {
-        if (isAmbientFrequency(uniq[i].freq, uniq[i].sf)) continue;
         recordDiversityHit(uniq[i].freq, uniq[i].sf);
         fired++;
     }
