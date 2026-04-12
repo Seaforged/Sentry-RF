@@ -35,6 +35,9 @@ Thumbs.db
 *.log
 test_output*.txt
 
+# Test tooling
+tools/
+
 # Research/planning documents
 Research1 (1).md
 Research1 (5).md
