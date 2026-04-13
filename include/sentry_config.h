@@ -39,7 +39,7 @@ static const unsigned long COOLDOWN_MS   = 5000;    // ms before threat decays o
 static const int RSSI_SWEEP_INTERVAL     = 3;       // run RSSI sweep every Nth CAD cycle
 
 // ── Rapid-Clear Path ──────────────────────────────────────────────────
-static const int RAPID_CLEAR_CLEAN_CYCLES = 4;      // consecutive clean cycles to force CLEAR
+static const unsigned long RAPID_CLEAR_CLEAN_MS = 5000;  // ms of continuous clean state to force CLEAR
 
 // ── CAD Tap Persistence ───────────────────────────────────────────────
 static const int   MAX_TAPS              = 32;      // max concurrent CAD taps
@@ -88,7 +88,8 @@ static const int MAX_DIVERSITY_SLOTS           = 32;      // max tracked distinc
 static const uint8_t PERSISTENCE_MIN_CONSECUTIVE = 5;     // consecutive high-diversity cycles (legacy cycle-based gate)
 static const unsigned long PERSISTENCE_MIN_MS    = 5000;  // min wall-clock time for persistence (board-parity gate — 5s filters infrastructure spikes while allowing fast escalation)
 static const uint8_t PERSISTENCE_MIN_DIVERSITY   = 2;     // min raw diversity to count as "sustained" (v1.6.1: lowered from 3 because ambient filter consumes most of the frequency space)
-static const uint8_t DIVERSITY_VELOCITY_WINDOW   = 3;     // scan cycles for velocity calculation
+static const uint8_t DIVERSITY_VELOCITY_WINDOW   = 3;     // legacy (kept for array sizing in build)
+static const unsigned long DIVERSITY_VELOCITY_WINDOW_MS = 5000; // 5s wall-clock window for velocity
 static const uint8_t DIVERSITY_VELOCITY_FHSS_MIN = 2;     // min velocity for full FHSS confidence
 static const uint8_t DIVERSITY_VELOCITY_BONUS_MIN = 5;    // min velocity for bonus confidence points
 static const uint8_t DIVERSITY_VELOCITY_BONUS_PTS = 10;   // bonus confidence points for high velocity
@@ -100,7 +101,8 @@ static const uint8_t DIVERSITY_VELOCITY_BONUS_PTS = 10;   // bonus confidence po
 // existing recordDiversityHit() path so normal persistence/velocity/
 // escalation logic applies. Addresses FHSS-invisibility regression found
 // during JJ v2.0.0 real-signal testing 2026-04-11.
-static const uint8_t FHSS_WINDOW_CYCLES    = 3;     // rolling window size
+static const uint8_t FHSS_WINDOW_CYCLES    = 3;     // legacy (kept for array sizing in build)
+static const unsigned long FHSS_WINDOW_MS  = 5000;  // 5s wall-clock window for FHSS spread tracker
 static const uint8_t FHSS_UNIQUE_THRESHOLD = 3;     // min unique freqs to fire (lowered from 4 for narrow-hop protocols like mLRS)
 
 // ── RSSI Ambient Filter ──────────────────────────────────────────────

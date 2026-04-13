@@ -106,7 +106,7 @@ static ThreatLevel currentThreat = THREAT_CLEAR;
 static unsigned long lastThreatEventMs = 0;
 static uint32_t lastDetectionMs = 0;
 // COOLDOWN_MS from sentry_config.h
-static int cleanCycleCount = 0;
+static unsigned long cleanSinceMs = 0;  // wall-clock time when allClean became true
 static unsigned long clearSinceMs = 0;
 
 // Captured at the top of detectionEngineUpdate() so assessThreat() can gate
@@ -549,7 +549,7 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
         bandEnergyIdxUS = 0; bandEnergySamplesUS = 0; bandEnergyElevatedUS = false;
         bandEnergyIdxEU = 0; bandEnergySamplesEU = 0; bandEnergyElevatedEU = false;
         bandEnergyElevated = false;
-        cleanCycleCount = 0;
+        cleanSinceMs = 0;
         clearSinceMs = 0;
         currentThreat = THREAT_CLEAR;
         desired = THREAT_CLEAR;
@@ -591,15 +591,15 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
                     && !bandEnergyElevated;
 
     if (allClean) {
-        cleanCycleCount++;
-        if (cleanCycleCount >= RAPID_CLEAR_CLEAN_CYCLES && currentThreat >= THREAT_WARNING) {
-            Serial.printf("[RAPID-CLEAR] %d clean cycles — forcing CLEAR\n", cleanCycleCount);
+        if (cleanSinceMs == 0) cleanSinceMs = now;
+        if ((now - cleanSinceMs) >= RAPID_CLEAR_CLEAN_MS && currentThreat >= THREAT_WARNING) {
+            Serial.printf("[RAPID-CLEAR] %lums clean — forcing CLEAR\n", now - cleanSinceMs);
             desired = THREAT_CLEAR;
-            cleanCycleCount = 0;
+            cleanSinceMs = 0;
             lastThreatEventMs = now;
         }
     } else {
-        cleanCycleCount = 0;
+        cleanSinceMs = 0;
     }
 
     // Sustained-CLEAR diversity reset: if CLEAR for 60 continuous seconds,
