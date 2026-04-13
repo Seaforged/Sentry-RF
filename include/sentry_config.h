@@ -86,7 +86,7 @@ static const int MAX_DIVERSITY_SLOTS           = 32;      // max tracked distinc
 
 // ── AAD: Persistence Gate + Diversity Velocity ───────────────────────
 static const uint8_t PERSISTENCE_MIN_CONSECUTIVE = 5;     // consecutive high-diversity cycles (legacy cycle-based gate)
-static const unsigned long PERSISTENCE_MIN_MS    = 8000;  // min wall-clock time for a tap to be persistently confirmed (board-parity gate)
+static const unsigned long PERSISTENCE_MIN_MS    = 5000;  // min wall-clock time for persistence (board-parity gate — 5s filters infrastructure spikes while allowing fast escalation)
 static const uint8_t PERSISTENCE_MIN_DIVERSITY   = 2;     // min raw diversity to count as "sustained" (v1.6.1: lowered from 3 because ambient filter consumes most of the frequency space)
 static const uint8_t DIVERSITY_VELOCITY_WINDOW   = 3;     // scan cycles for velocity calculation
 static const uint8_t DIVERSITY_VELOCITY_FHSS_MIN = 2;     // min velocity for full FHSS confidence
@@ -115,18 +115,38 @@ static const float CNO_STDDEV_SPOOF_THRESH = 2.0f;  // dB-Hz — below this = sp
 static const int   MIN_ELEV_FOR_CNO        = 20;    // degrees — exclude low-elevation sats
 
 // ── Confidence Scoring Weights ────────────────────────────────────────
-static const int WEIGHT_DIVERSITY_PER_FREQ = 8;    // per distinct frequency in window
-static const int WEIGHT_CAD_CONFIRMED      = 15;   // per confirmed CAD tap
-static const int WEIGHT_FSK_CONFIRMED      = 12;   // per confirmed FSK tap
-static const int WEIGHT_RSSI_PERSISTENT_US = 10;   // persistent RSSI in 902-928 MHz
-static const int WEIGHT_RSSI_PERSISTENT_EU = 5;    // persistent RSSI in 860-886 MHz
-static const int WEIGHT_BAND_ENERGY        = 5;    // band energy elevated
-static const int WEIGHT_GNSS_ANOMALY       = 15;   // GNSS integrity anomaly
-static const int WEIGHT_24GHZ_PERSISTENT   = 10;   // 2.4 GHz persistent (LR1121)
-static const int WEIGHT_REMOTE_ID          = 20;   // WiFi Remote ID detected
-static const int SCORE_ADVISORY            = 8;    // score threshold for ADVISORY
-static const int SCORE_WARNING             = 24;   // score threshold for WARNING (div=3 → 3×8)
-static const int SCORE_CRITICAL            = 40;   // score threshold for CRITICAL (div=5 → 5×8)
+// ── Two-layer scorer (v1.8.0) ────────────────────────────────────────
+// Fast score: CAD-only evidence. Updates every cycle. Drives ADVISORY.
+// CAD/FSK confirmed counts scale per-tap inline in assessThreat()
+// (10/tap CAD capped at 40, 15/tap FSK capped at 30).
+static const int WEIGHT_FAST_PERSISTENT_DIV    = 20;  // persistent diversity > 0
+static const int WEIGHT_FAST_FHSS_VELOCITY     = 15;  // diversity velocity at FHSS threshold
+// Confirm score: RSSI + protocol + RID + GNSS. Updates on fresh evidence only.
+static const int WEIGHT_CONFIRM_PEAK           = 5;   // RSSI peak above floor
+static const int WEIGHT_CONFIRM_PROTO          = 15;  // protocol signature matched
+static const int WEIGHT_CONFIRM_REMOTE_ID      = 30;  // WiFi Remote ID detected
+static const int WEIGHT_CONFIRM_BAND_ENERGY    = 10;  // band energy elevated
+static const int WEIGHT_CONFIRM_GNSS_TEMPORAL  = 25;  // GNSS anomaly temporally correlated
+// Policy thresholds (fastScore, confirmScore) → ThreatLevel
+static const int FAST_ADVISORY_THRESH          = 15;  // fast score alone → ADVISORY
+static const int FAST_WARNING_THRESH           = 40;  // fast score floor for WARNING/CRITICAL
+static const int CONFIRM_WARNING_THRESH        = 5;   // confirm score for WARNING (with fast)
+static const int CONFIRM_CRITICAL_THRESH       = 30;  // confirm score for CRITICAL (with fast)
+static const int CONFIRM_ADVISORY_THRESH       = 30;  // confirm score alone → ADVISORY (RID-only)
+
+// Legacy weights (retained for callers not yet migrated to two-layer scorer)
+static const int WEIGHT_DIVERSITY_PER_FREQ = 8;
+static const int WEIGHT_CAD_CONFIRMED      = 15;
+static const int WEIGHT_FSK_CONFIRMED      = 12;
+static const int WEIGHT_RSSI_PERSISTENT_US = 10;
+static const int WEIGHT_RSSI_PERSISTENT_EU = 5;
+static const int WEIGHT_BAND_ENERGY        = 5;
+static const int WEIGHT_GNSS_ANOMALY       = 15;
+static const int WEIGHT_24GHZ_PERSISTENT   = 10;
+static const int WEIGHT_REMOTE_ID          = 20;
+static const int SCORE_ADVISORY            = 8;
+static const int SCORE_WARNING             = 24;
+static const int SCORE_CRITICAL            = 40;
 
 // ── Fast-Detect Scoring Bonus ────────────────────────────────────────
 static const uint8_t FAST_DETECT_MIN_DIVERSITY = 5;  // raw diversity threshold for fast path
