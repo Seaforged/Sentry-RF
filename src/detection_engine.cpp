@@ -672,7 +672,14 @@ int detectionEngineGetConfirmScore() { return lastConfirmScore; }
 
 uint32_t getLastDetectionMs() { return lastDetectionMs; }
 
-void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad,
+// ── Refactor 3: split ingest/assess ────────────────────────────────────────
+// Duplicate sweep rejection: if the same ScanResult is fed to
+// detectionEngineIngestSweep() twice in a row (same seq), reject the second
+// call so tracking counters don't double-count the same observation.
+static uint32_t lastProcessedSweepSeq = 0;
+static uint32_t lastProcessed24Seq = 0;
+
+void detectionEngineIngestCad(int cadCount, int fskCount, int strongPendingCad,
                               int activeTaps, int diversityCount,
                               int persistentDiversity, int diversityVelocity,
                               int sustainedCycles) {
@@ -686,15 +693,18 @@ void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad,
     sustainedDiversityCyclesThisCycle = sustainedCycles;
 }
 
-ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
-                                  const IntegrityStatus& integrity,
-                                  const ScanResult24* scan24,
-                                  bool freshRssi) {
-    freshRssiThisCycle = freshRssi;
-    if (freshRssi) {
-        ambientFilterUpdate(scan);
-        updateBandEnergy(scan.rssi);
+void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan24) {
+    // Reject duplicate sweeps — safety net. scannerSweep() increments seq on
+    // every call, so consecutive calls never share a seq; this guards against
+    // stale ScanResult reuse from the caller.
+    if (scan.valid && scan.seq == lastProcessedSweepSeq) {
+        return;
     }
+    lastProcessedSweepSeq = scan.seq;
+
+    freshRssiThisCycle = true;
+    ambientFilterUpdate(scan);
+    updateBandEnergy(scan.rssi);
 
     // Sub-GHz RSSI pipeline
     float noiseFloor = computeNoiseFloor(scan.rssi, SCAN_BIN_COUNT);
@@ -706,7 +716,9 @@ ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
     updateProtoTracking(peaks, peakCount);
 
     // 2.4 GHz pipeline (LR1121 only)
-    if (scan24 != nullptr && scan24->valid) {
+    if (scan24 != nullptr && scan24->valid && scan24->seq != lastProcessed24Seq) {
+        lastProcessed24Seq = scan24->seq;
+
         float nf24 = computeNoiseFloor(scan24->rssi, SCAN_24_BIN_COUNT);
         DetectedPeak peaks24[MAX_PEAKS];
         int peakCount24 = extractPeaks24(*scan24, nf24, peaks24);
@@ -751,6 +763,34 @@ ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
         }
         cleanupProtoTracking();
     }
+}
 
-    return assessThreat(integrity);
+ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& integrity) {
+    (void)gps;  // reserved for future geo-gated scoring
+    ThreatLevel result = assessThreat(integrity);
+    // Reset freshRssiThisCycle so the NEXT non-sweep cycle's confirm score
+    // doesn't re-use RSSI-derived evidence from the previous sweep.
+    freshRssiThisCycle = false;
+    return result;
+}
+
+// ── Deprecated backward-compat wrappers ───────────────────────────────────
+
+void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad,
+                              int activeTaps, int diversityCount,
+                              int persistentDiversity, int diversityVelocity,
+                              int sustainedCycles) {
+    detectionEngineIngestCad(cadCount, fskCount, strongPendingCad, activeTaps,
+                             diversityCount, persistentDiversity,
+                             diversityVelocity, sustainedCycles);
+}
+
+ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
+                                  const IntegrityStatus& integrity,
+                                  const ScanResult24* scan24,
+                                  bool freshRssi) {
+    if (freshRssi) {
+        detectionEngineIngestSweep(scan, scan24);
+    }
+    return detectionEngineAssess(gps, integrity);
 }

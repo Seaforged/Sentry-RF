@@ -17,6 +17,8 @@ struct ScanResult {
     float peakFreq;
     float peakRSSI;
     unsigned long sweepTimeMs;
+    uint32_t seq;        // monotonic sequence number, incremented per sweep
+    bool valid;          // true once a real sweep has populated this struct
 };
 
 // 2.4 GHz sweep parameters — only populated on LR1121 boards
@@ -31,6 +33,7 @@ struct ScanResult24 {
     float peakRSSI;
     unsigned long sweepTimeMs;
     bool valid;   // false on SX1262 boards
+    uint32_t seq; // monotonic sequence number, incremented per sweep
 };
 
 // Sub-GHz scanner — works on both SX1262 and LR1121

@@ -5,6 +5,11 @@
 #include <algorithm>
 #include <cmath>
 
+// Monotonic sequence number for sweeps — incremented by every scannerSweep()
+// and scannerSweep24() call. detectionEngineIngestSweep() uses this to reject
+// duplicate sweeps (e.g. stale data reused between cycles).
+static uint32_t sweepSeq = 0;
+
 // ── Adaptive Noise Floor (Phase 1.1) ───────────────────────────────────────
 // Dual-time-constant IIR on per-sweep median RSSI. -120 dBm at boot is a
 // conservative starting point — the fast-attack branch pulls it down to the
@@ -120,6 +125,8 @@ void scannerSweep(LR1121_RSSI& radio, ScanResult& result) {
     }
 
     result.sweepTimeMs = millis() - startTime;
+    result.seq = ++sweepSeq;
+    result.valid = true;
     computeAdaptiveNoiseFloor(result);
 }
 
@@ -173,6 +180,7 @@ void scannerSweep24(LR1121_RSSI& radio, ScanResult24& result) {
     }
 
     result.sweepTimeMs = millis() - startTime;
+    result.seq = ++sweepSeq;
 }
 
 #else // SX1262 boards
@@ -240,6 +248,8 @@ void scannerSweep(SX1262& radio, ScanResult& result) {
     radio.standby();
 
     result.sweepTimeMs = millis() - startTime;
+    result.seq = ++sweepSeq;
+    result.valid = true;
     computeAdaptiveNoiseFloor(result);
 
     // Debug: check RSSI at key frequencies across the band
