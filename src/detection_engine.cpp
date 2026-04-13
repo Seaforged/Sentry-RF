@@ -109,6 +109,12 @@ static uint32_t lastDetectionMs = 0;
 static int cleanCycleCount = 0;
 static unsigned long clearSinceMs = 0;
 
+// Captured at the top of detectionEngineUpdate() so assessThreat() can gate
+// RSSI-derived confirm score components on whether the sweep is fresh.
+static bool freshRssiThisCycle = false;
+static int lastFastScore = 0;
+static int lastConfirmScore = 0;
+
 // ── Noise floor calculation ─────────────────────────────────────────────────
 
 static float computeNoiseFloor(const float* rssi, int count) {
@@ -454,73 +460,43 @@ static void emitFskEvent(float freq, uint8_t severity) {
 static int lastScore = 0;  // exposed for serial output
 
 static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
-    // ── Weighted confidence scoring ──────────────────────────────────
-    // Each detection source contributes a configurable weight.
-    // Score thresholds map to threat levels.
-    // Weights calibrated to match previous boolean logic behavior.
-    int score = 0;
+    // ── Two-layer scoring (v1.8.0) ───────────────────────────────────
+    // FAST score: CAD-only evidence. Updates every cycle. Drives ADVISORY
+    // immediately from cycle 1 — no warmup gate needed.
+    //
+    // CAD/FSK weights scale per-tap (10/tap CAD, 15/tap FSK) so a single
+    // infrastructure tap contributes 10 points (ADVISORY only) while 4+
+    // confirmed drone taps reach the 40-point WARNING floor.
+    int fastScore = 0;
+    int cadFastPts = cadDetectionsThisCycle * 10;
+    if (cadFastPts > 40) cadFastPts = 40;
+    int fskFastPts = fskDetectionsThisCycle * 15;
+    if (fskFastPts > 30) fskFastPts = 30;
+    fastScore += cadFastPts;
+    fastScore += fskFastPts;
+    if (persistentDiversityThisCycle > 0)    fastScore += WEIGHT_FAST_PERSISTENT_DIV;
+    if (diversityVelocityThisCycle >= DIVERSITY_VELOCITY_FHSS_MIN)
+                                             fastScore += WEIGHT_FAST_FHSS_VELOCITY;
 
-    // Primary: frequency diversity (FHSS discriminator)
-    // Use PERSISTENT diversity — only frequencies with 2+ consecutive cycle hits
-    int diversity = persistentDiversityThisCycle;
-    int velocity = diversityVelocityThisCycle;
-
-    // Velocity-modulated diversity scoring:
-    // Low velocity = infrastructure slowly accumulating → halve diversity weight
-    // High velocity = FHSS burst → full weight + bonus
-    if (velocity < DIVERSITY_VELOCITY_FHSS_MIN) {
-        score += diversity * (WEIGHT_DIVERSITY_PER_FREQ / 2);
-    } else {
-        score += diversity * WEIGHT_DIVERSITY_PER_FREQ;
-        if (velocity >= DIVERSITY_VELOCITY_BONUS_MIN)
-            score += DIVERSITY_VELOCITY_BONUS_PTS;
+    // CONFIRM score: RSSI + protocol + RID + GNSS. Independent corroboration
+    // gates promotion to WARNING/CRITICAL. RSSI-derived components only fire
+    // on fresh sweeps — avoids stale-data contributions on non-sweep cycles.
+    int confirmScore = 0;
+    if (freshRssiThisCycle) {
+        int freqUS = countPersistentDroneUS();
+        int protoUS = countPersistentProtocolUS();
+        int freqSubGHz = countPersistentDrone();
+        int protoSubGHz = countPersistentProtocol(false);
+        int proto24GHz = countPersistentProtocol(true);
+        int freq24GHz = countPersistentDrone24();
+        bool anyPeak = (freqUS + freqSubGHz + freq24GHz) > 0;
+        bool anyProto = (protoUS + protoSubGHz + proto24GHz) > 0;
+        if (anyPeak)  confirmScore += WEIGHT_CONFIRM_PEAK;
+        if (anyProto) confirmScore += WEIGHT_CONFIRM_PROTO;
+        if (bandEnergyElevated) confirmScore += WEIGHT_CONFIRM_BAND_ENERGY;
     }
 
-    // Primary: confirmed CAD/FSK taps
-    // Halve weight without sustained diversity — ambient gateways produce conf
-    // without FHSS pattern; real drones always produce both simultaneously
-    if (persistentDiversityThisCycle > 0) {
-        score += cadDetectionsThisCycle * WEIGHT_CAD_CONFIRMED;
-        score += fskDetectionsThisCycle * WEIGHT_FSK_CONFIRMED;
-    } else {
-        score += cadDetectionsThisCycle * (WEIGHT_CAD_CONFIRMED / 2);
-        score += fskDetectionsThisCycle * (WEIGHT_FSK_CONFIRMED / 2);
-    }
-
-    // Fast-detect: high PERSISTENT diversity + confirmed tap = unmistakable drone
-    // Uses persistent diversity (not raw) to prevent ambient LoRa from triggering.
-    // Requires sustainedCycles beyond the persistence gate — ambient that barely
-    // passes the gate for 1-2 cycles won't get the +20 bonus.
-    if (persistentDiversityThisCycle >= FAST_DETECT_MIN_DIVERSITY &&
-        cadDetectionsThisCycle >= FAST_DETECT_MIN_CONF &&
-        sustainedDiversityCyclesThisCycle > PERSISTENCE_MIN_CONSECUTIVE) {
-        score += WEIGHT_FAST_DETECT;
-    }
-
-    // Supporting: RSSI persistence
-    int freqUS = countPersistentDroneUS();
-    int protoUS = countPersistentProtocolUS();
-    if (freqUS >= 1 || protoUS >= 1) score += WEIGHT_RSSI_PERSISTENT_US;
-
-    int freqSubGHz = countPersistentDrone();
-    int protoSubGHz = countPersistentProtocol(false);
-    if (freqSubGHz >= 1 || protoSubGHz >= 1) score += WEIGHT_RSSI_PERSISTENT_EU;
-
-    // Supporting: band energy
-    if (bandEnergyElevated) score += WEIGHT_BAND_ENERGY;
-
-    // Supporting: 2.4 GHz (LR1121)
-    int proto24GHz = countPersistentProtocol(true);
-    int freq24GHz = countPersistentDrone24();
-    if (proto24GHz >= 1 || freq24GHz >= 1) score += WEIGHT_24GHZ_PERSISTENT;
-
-    // Cross-domain: GNSS anomaly
-    bool gnssAnomaly = integrity.jammingDetected || integrity.spoofingDetected ||
-                       integrity.cnoAnomalyDetected;
-    if (gnssAnomaly) score += WEIGHT_GNSS_ANOMALY;
-
-    // Cross-domain: WiFi Remote ID (set by wifiScanTask via systemState)
-    // Consider RID "active" if detected within the last 10 seconds
+    // WiFi Remote ID — independent evidence, not RSSI-gated
     bool ridDetected = false;
     unsigned long ridLastMs = 0;
     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(5))) {
@@ -528,34 +504,42 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
         ridLastMs = systemState.remoteIdLastMs;
         xSemaphoreGive(stateMutex);
     }
-    if (ridDetected &&
-        (millis() - ridLastMs) < 10000) {
-        score += WEIGHT_REMOTE_ID;
+    if (ridDetected && (millis() - ridLastMs) < 10000) {
+        confirmScore += WEIGHT_CONFIRM_REMOTE_ID;
     }
 
-    lastScore = score;
+    // GNSS anomaly — cross-domain independent evidence
+    bool gnssAnomaly = integrity.jammingDetected || integrity.spoofingDetected ||
+                       integrity.cnoAnomalyDetected;
+    if (gnssAnomaly) confirmScore += WEIGHT_CONFIRM_GNSS_TEMPORAL;
 
-    // Map score to threat level
+    lastFastScore = fastScore;
+    lastConfirmScore = confirmScore;
+    lastScore = fastScore + confirmScore;  // legacy display field
+
+    // ── Policy: fast produces ADVISORY, confirm promotes to WARNING/CRITICAL
     ThreatLevel desired = THREAT_CLEAR;
-    if (score >= SCORE_CRITICAL) desired = THREAT_CRITICAL;
-    else if (score >= SCORE_WARNING) desired = THREAT_WARNING;
-    else if (score >= SCORE_ADVISORY) desired = THREAT_ADVISORY;
+    if (fastScore >= FAST_WARNING_THRESH && confirmScore >= CONFIRM_CRITICAL_THRESH) {
+        desired = THREAT_CRITICAL;
+    } else if (fastScore >= FAST_WARNING_THRESH && confirmScore >= CONFIRM_WARNING_THRESH) {
+        desired = THREAT_WARNING;
+    } else if (fastScore >= FAST_ADVISORY_THRESH) {
+        desired = THREAT_ADVISORY;
+    } else if (confirmScore >= CONFIRM_ADVISORY_THRESH) {
+        // RID-only path: Remote ID detection alone is enough for ADVISORY
+        desired = THREAT_ADVISORY;
+    }
 
     if (desired >= THREAT_ADVISORY) lastDetectionMs = millis();
 
-    // Soft warmup gate: detection is live from cycle 1 (ADVISORY can fire
-    // immediately) but WARNING/CRITICAL are suppressed until both filters
-    // finish learning. This prevents false high-severity alerts during the
-    // first ~10s while the adaptive noise floor converges.
+    // Post-warmup housekeeping: clear persistence counters once the filters
+    // finish learning. The two-score system is safe from cycle 1, so no
+    // artificial warmup cap on threat level — the confirm path IS the gate.
     static bool postWarmupReset = false;
     bool warmupActive = !ambientFilterReady() || !cadWarmupComplete();
     if (warmupActive) {
-        if (desired > THREAT_ADVISORY) desired = THREAT_ADVISORY;
         postWarmupReset = false;
     } else if (!postWarmupReset) {
-        // One-time reset when warmup ends: clear persistence counters that
-        // accumulated from ambient signals during warmup. A real drone arriving
-        // after warmup will rebuild these within seconds.
         postWarmupReset = true;
         for (int t = 0; t < MAX_TRACKED; t++) { tracked[t].active = false; }
         for (int t = 0; t < MAX_TRACKED; t++) { tracked24[t].active = false; }
@@ -574,14 +558,20 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
 
     unsigned long now = millis();
 
-    // Hysteresis: increase by one step per sweep cycle
+    // Escalation: jump directly to the level evidence supports (fast up).
+    // This replaces the old one-step-per-cycle limiter which delayed
+    // legitimate detections by N cycles during escalation.
     if (desired > currentThreat) {
-        desired = (ThreatLevel)(currentThreat + 1);
+        currentThreat = desired;
+        lastThreatEventMs = now;
+    } else if (desired == currentThreat && currentThreat > THREAT_CLEAR) {
+        // Steady state at evidence-supported level — reset cooldown timer
+        // so we don't decay while evidence is still present.
         lastThreatEventMs = now;
     }
 
-    // Cooldown: decay one step every COOLDOWN_MS
-    if (desired <= currentThreat && currentThreat > THREAT_CLEAR) {
+    // Cooldown: decay one step every COOLDOWN_MS when evidence weakens
+    if (desired < currentThreat && currentThreat > THREAT_CLEAR) {
         if (now - lastThreatEventMs > COOLDOWN_MS) {
             desired = (ThreatLevel)(currentThreat - 1);
             lastThreatEventMs = now;
@@ -626,8 +616,8 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
 
     // Emit events on change
     if (desired != currentThreat) {
-        // CAD/FSK events (emit when score indicates high confidence)
-        if (score >= SCORE_WARNING) {
+        // CAD/FSK events (emit when threat at WARNING+)
+        if (desired >= THREAT_WARNING) {
             if (cadDetectionsThisCycle > 0)
                 emitCadEvent(0, 6, desired);
             if (fskDetectionsThisCycle > 0)
@@ -677,6 +667,8 @@ void detectionEngineInit() {
 }
 
 int detectionEngineGetScore() { return (lastScore > 100) ? 100 : lastScore; }
+int detectionEngineGetFastScore() { return lastFastScore; }
+int detectionEngineGetConfirmScore() { return lastConfirmScore; }
 
 uint32_t getLastDetectionMs() { return lastDetectionMs; }
 
@@ -698,6 +690,7 @@ ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
                                   const IntegrityStatus& integrity,
                                   const ScanResult24* scan24,
                                   bool freshRssi) {
+    freshRssiThisCycle = freshRssi;
     if (freshRssi) {
         ambientFilterUpdate(scan);
         updateBandEnergy(scan.rssi);
