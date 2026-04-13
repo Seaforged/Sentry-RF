@@ -25,7 +25,24 @@ struct CadTap {
     bool     isAmbient;       // true if matches ambient source from warmup
 };
 
+struct CadBandSummary {
+    int confirmedCadCount;
+    int confirmedFskCount;
+    int strongPendingCad;
+    int pendingTaps;
+    int totalActiveTaps;
+    int diversityCount;
+    int persistentDiversityCount;
+    int diversityVelocity;
+    int sustainedCycles;
+};
+
 struct CadFskResult {
+    CadBandSummary subGHz;
+#ifdef BOARD_T3S3_LR1121
+    CadBandSummary band24;
+#endif
+    // Aggregated totals for backward compat with main.cpp logging / detection_engine
     int confirmedCadCount;        // CAD taps with 3+ consecutive hits
     int confirmedFskCount;        // FSK taps with 3+ consecutive hits
     int strongPendingCad;         // CAD taps with exactly 2 consecutive hits

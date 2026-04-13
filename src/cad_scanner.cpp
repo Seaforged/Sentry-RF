@@ -89,9 +89,16 @@ static ChannelScanConfig_t buildCadConfigLR(uint8_t sf) {
 }
 #endif
 
-// ── Tap list (persists across scan cycles) ──────────────────────────────────
-
-static CadTap tapList[MAX_TAPS];
+// ── Frequency Diversity Tracker slot struct ──────────────────────────────
+// (definition must precede BandTracker)
+struct DiversitySlot {
+    float frequency;
+    uint8_t sf;
+    unsigned long lastHitMs;
+    uint8_t consecutiveHits;  // consecutive scan cycles with a hit
+    bool hitThisCycle;        // marked during scan, cleared at cycle start
+    bool active;
+};
 
 // ── Per-SF rotation counters ────────────────────────────────────────────────
 
@@ -129,6 +136,29 @@ struct AmbientTap {
 static AmbientTap ambientTaps[MAX_AMBIENT_TAPS];
 static uint8_t ambientTapCount = 0;
 static uint16_t warmupCycleCount = 0;
+
+// ── Per-band tracker ─────────────────────────────────────────────────────
+// All state that used to be shared across sub-GHz and 2.4 GHz is now per-
+// band. Each tracker owns its own tap list, diversity slots, sustained-
+// diversity counters, and velocity window. Sub-GHz and 2.4 GHz detection
+// cannot cross-contaminate.
+struct BandTracker {
+    CadTap taps[MAX_TAPS];
+    DiversitySlot diversitySlots[MAX_DIVERSITY_SLOTS];
+    int sustainedDiversityCycles;
+    int prevSustainedDiversityCycles;
+    unsigned long sustainedStartMs;
+    // Velocity samples: (timestamp, crossed) pairs. Velocity = sum of crossed
+    // values with timestamps inside DIVERSITY_VELOCITY_WINDOW_MS.
+    struct VelocitySample { uint32_t tsMs; int crossed; };
+    VelocitySample velocitySamples[DIVERSITY_VELOCITY_WINDOW];
+    int velocityIdx;
+};
+
+static BandTracker subGHzTracker;
+#ifdef BOARD_T3S3_LR1121
+static BandTracker band24Tracker;
+#endif
 
 // Cached radio mode — avoids redundant packet type switches.
 // On non-RSSI cycles, the radio never leaves LoRa mode so ensureLoRa() is a
@@ -226,37 +256,16 @@ static bool isAmbientFrequency(float freq, uint8_t sf) {
 // infrastructure hits the same 1-3 frequencies repeatedly.
 // This is the primary FHSS discriminator — count ≠ frequency spread.
 
-struct DiversitySlot {
-    float frequency;
-    uint8_t sf;
-    unsigned long lastHitMs;
-    uint8_t consecutiveHits;  // consecutive scan cycles with a hit
-    bool hitThisCycle;        // marked during scan, cleared at cycle start
-    bool active;
-};
-
-static DiversitySlot diversitySlots[MAX_DIVERSITY_SLOTS];
-
-// Sustained-diversity persistence: tracks consecutive cycles with high raw diversity.
-// FHSS drones sustain high diversity every cycle; infrastructure spikes briefly.
-static int sustainedDiversityCycles = 0;
-static int prevSustainedDiversityCycles = 0;  // for velocity: detect threshold crossings
-static unsigned long sustainedStartMs = 0;    // wall-clock start of current sustained run
-
-// Diversity velocity: track sustained-diversity threshold crossings per window
-static int velocityHistory[DIVERSITY_VELOCITY_WINDOW];
-static int velocityIdx = 0;
-
-static void recordDiversityHit(float freq, uint8_t sf) {
+static void recordDiversityHit(BandTracker& t, float freq, uint8_t sf) {
     unsigned long now = millis();
 
     // Check if this frequency/SF already has a slot
     for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
-        if (diversitySlots[i].active &&
-            diversitySlots[i].sf == sf &&
-            fabsf(diversitySlots[i].frequency - freq) <= TAP_FREQ_TOL) {
-            diversitySlots[i].lastHitMs = now;
-            diversitySlots[i].hitThisCycle = true;
+        if (t.diversitySlots[i].active &&
+            t.diversitySlots[i].sf == sf &&
+            fabsf(t.diversitySlots[i].frequency - freq) <= TAP_FREQ_TOL) {
+            t.diversitySlots[i].lastHitMs = now;
+            t.diversitySlots[i].hitThisCycle = true;
             return;  // Same frequency — no new diversity
         }
     }
@@ -265,49 +274,49 @@ static void recordDiversityHit(float freq, uint8_t sf) {
     int bestSlot = 0;
     unsigned long oldestTime = ULONG_MAX;
     for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
-        if (!diversitySlots[i].active) {
+        if (!t.diversitySlots[i].active) {
             bestSlot = i;
             break;
         }
-        if (diversitySlots[i].lastHitMs < oldestTime) {
-            oldestTime = diversitySlots[i].lastHitMs;
+        if (t.diversitySlots[i].lastHitMs < oldestTime) {
+            oldestTime = t.diversitySlots[i].lastHitMs;
             bestSlot = i;
         }
     }
 
-    diversitySlots[bestSlot].frequency = freq;
-    diversitySlots[bestSlot].sf = sf;
-    diversitySlots[bestSlot].lastHitMs = now;
-    diversitySlots[bestSlot].consecutiveHits = 0;  // first hit, will become 1 at cycle end
-    diversitySlots[bestSlot].hitThisCycle = true;
-    diversitySlots[bestSlot].active = true;
+    t.diversitySlots[bestSlot].frequency = freq;
+    t.diversitySlots[bestSlot].sf = sf;
+    t.diversitySlots[bestSlot].lastHitMs = now;
+    t.diversitySlots[bestSlot].consecutiveHits = 0;  // first hit, will become 1 at cycle end
+    t.diversitySlots[bestSlot].hitThisCycle = true;
+    t.diversitySlots[bestSlot].active = true;
 }
 
-// Forward declarations for cycle update
-static int countDiversity(unsigned long windowMs);
+// Forward declaration for cycle update
+static int countDiversity(BandTracker& t, unsigned long windowMs);
 
 // Call at the START of each scan cycle to update sustained-diversity tracking
 // from the previous cycle's diversity count.
-static void diversityCycleUpdate() {
+static void diversityCycleUpdate(BandTracker& t) {
     // Update per-slot counters (kept for future use, not used for gate)
     for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
-        if (!diversitySlots[i].active) continue;
-        if (diversitySlots[i].hitThisCycle) {
-            if (diversitySlots[i].consecutiveHits < 255) diversitySlots[i].consecutiveHits++;
-            diversitySlots[i].hitThisCycle = false;
+        if (!t.diversitySlots[i].active) continue;
+        if (t.diversitySlots[i].hitThisCycle) {
+            if (t.diversitySlots[i].consecutiveHits < 255) t.diversitySlots[i].consecutiveHits++;
+            t.diversitySlots[i].hitThisCycle = false;
         } else {
-            diversitySlots[i].consecutiveHits = 0;
+            t.diversitySlots[i].consecutiveHits = 0;
         }
     }
 
     // Sustained-diversity gate: was last cycle's raw diversity above threshold?
-    int rawDiv = countDiversity(DIVERSITY_WINDOW_MS);
-    prevSustainedDiversityCycles = sustainedDiversityCycles;
-    bool wasTimeSustained = (sustainedStartMs != 0) &&
-                            ((millis() - sustainedStartMs) >= PERSISTENCE_MIN_MS);
+    int rawDiv = countDiversity(t, DIVERSITY_WINDOW_MS);
+    t.prevSustainedDiversityCycles = t.sustainedDiversityCycles;
+    bool wasTimeSustained = (t.sustainedStartMs != 0) &&
+                            ((millis() - t.sustainedStartMs) >= PERSISTENCE_MIN_MS);
     if (rawDiv >= PERSISTENCE_MIN_DIVERSITY) {
-        sustainedDiversityCycles++;
-        if (sustainedStartMs == 0) sustainedStartMs = millis();
+        t.sustainedDiversityCycles++;
+        if (t.sustainedStartMs == 0) t.sustainedStartMs = millis();
     } else {
         // Drone departure prune: if we had sustained diversity (drone present)
         // and it just collapsed, aggressively clear all non-ambient taps.
@@ -315,44 +324,44 @@ static void diversityCycleUpdate() {
         // for 30+ seconds after the drone leaves.
         if (wasTimeSustained) {
             for (int i = 0; i < MAX_TAPS; i++) {
-                if (tapList[i].active && !tapList[i].isAmbient) {
-                    tapList[i].active = false;
+                if (t.taps[i].active && !t.taps[i].isAmbient) {
+                    t.taps[i].active = false;
                 }
             }
         }
-        sustainedDiversityCycles = 0;
-        sustainedStartMs = 0;
+        t.sustainedDiversityCycles = 0;
+        t.sustainedStartMs = 0;
     }
 
     // Velocity: did we just cross the sustained threshold this cycle (time-based)?
-    bool isTimeSustained = (sustainedStartMs != 0) &&
-                           ((millis() - sustainedStartMs) >= PERSISTENCE_MIN_MS);
-    int crossed = 0;
+    bool isTimeSustained = (t.sustainedStartMs != 0) &&
+                           ((millis() - t.sustainedStartMs) >= PERSISTENCE_MIN_MS);
     if (isTimeSustained && !wasTimeSustained) {
-        crossed = rawDiv;  // all current diversity just became persistent
+        // Record a new crossing sample with current timestamp
+        t.velocitySamples[t.velocityIdx].tsMs = millis();
+        t.velocitySamples[t.velocityIdx].crossed = rawDiv;
+        t.velocityIdx = (t.velocityIdx + 1) % DIVERSITY_VELOCITY_WINDOW;
     }
-    velocityHistory[velocityIdx] = crossed;
-    velocityIdx = (velocityIdx + 1) % DIVERSITY_VELOCITY_WINDOW;
 }
 
-static void pruneExpiredDiversity() {
+static void pruneExpiredDiversity(BandTracker& t) {
     unsigned long now = millis();
     for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
-        if (diversitySlots[i].active &&
-            (now - diversitySlots[i].lastHitMs) >= DIVERSITY_WINDOW_MS) {
-            diversitySlots[i].active = false;
-            diversitySlots[i].consecutiveHits = 0;
+        if (t.diversitySlots[i].active &&
+            (now - t.diversitySlots[i].lastHitMs) >= DIVERSITY_WINDOW_MS) {
+            t.diversitySlots[i].active = false;
+            t.diversitySlots[i].consecutiveHits = 0;
         }
     }
 }
 
 // Count ALL active diversity slots (raw, for logging)
-static int countDiversity(unsigned long windowMs) {
+static int countDiversity(BandTracker& t, unsigned long windowMs) {
     unsigned long now = millis();
     int count = 0;
     for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
-        if (diversitySlots[i].active &&
-            (now - diversitySlots[i].lastHitMs) < windowMs) {
+        if (t.diversitySlots[i].active &&
+            (now - t.diversitySlots[i].lastHitMs) < windowMs) {
             count++;
         }
     }
@@ -363,113 +372,126 @@ static int countDiversity(unsigned long windowMs) {
 // for PERSISTENCE_MIN_MS wall-clock time, ALL current diversity qualifies.
 // Otherwise returns 0. Catches FHSS (many freqs every cycle) while filtering
 // sporadic infrastructure. Time-based gate gives board-parity timing.
-static int countPersistentDiversity(unsigned long windowMs) {
-    if (sustainedStartMs != 0 && (millis() - sustainedStartMs) >= PERSISTENCE_MIN_MS)
-        return countDiversity(windowMs);
+static int countPersistentDiversity(BandTracker& t, unsigned long windowMs) {
+    if (t.sustainedStartMs != 0 && (millis() - t.sustainedStartMs) >= PERSISTENCE_MIN_MS)
+        return countDiversity(t, windowMs);
     return 0;
 }
 
-static int getSustainedDiversityCycles() {
-    return sustainedDiversityCycles;
+static int getSustainedDiversityCycles(BandTracker& t) {
+    return t.sustainedDiversityCycles;
 }
 
-// Sum of newly-persistent slots over the velocity window
-static int computeDiversityVelocity() {
+// Sum of newly-persistent slots within DIVERSITY_VELOCITY_WINDOW_MS wall-clock.
+// Time-based: samples older than the window are ignored, regardless of cycle count.
+static int computeDiversityVelocity(BandTracker& t) {
+    uint32_t now = millis();
     int sum = 0;
-    for (int i = 0; i < DIVERSITY_VELOCITY_WINDOW; i++)
-        sum += velocityHistory[i];
+    for (int i = 0; i < DIVERSITY_VELOCITY_WINDOW; i++) {
+        if (t.velocitySamples[i].tsMs != 0 &&
+            (uint32_t)(now - t.velocitySamples[i].tsMs) < DIVERSITY_VELOCITY_WINDOW_MS) {
+            sum += t.velocitySamples[i].crossed;
+        }
+    }
     return sum;
 }
 
-// ── FHSS Frequency-Spread Tracker ────────────────────────────────────────────
-// Counts UNIQUE (freq,sf) CAD hits across FHSS_WINDOW_CYCLES rolling cycles.
-// When the unique count crosses FHSS_UNIQUE_THRESHOLD, each unique hit is
-// forwarded to recordDiversityHit() — bypassing the consecutiveHits>=2 gate
-// that blocks hopping transmitters from ever accumulating diversity.
+// ── FHSS Frequency-Spread Tracker (time-based) ──────────────────────────────
+// Tracks UNIQUE (freq,sf) CAD hits within the last FHSS_WINDOW_MS wall-clock
+// window. When the unique count crosses the baseline+threshold, each unique
+// hit is forwarded to recordDiversityHit() — bypassing the consecutiveHits>=2
+// gate that blocks hopping transmitters from ever accumulating diversity.
 //
-// Invariants:
-//  - fhssCycleAdvance() called once at the top of each scan cycle
-//  - fhssRecordHit(f,sf) called for every CAD LORA_DETECTED hit in Phase 2a
-//  - fhssFlushSpread() called after Phase 2a; it pushes to recordDiversityHit
-//    only if threshold crossed AND warmup is complete AND freq is non-ambient.
+// Storage: a flat array of timestamped hits. Expired hits (older than
+// FHSS_WINDOW_MS) are pruned on insertion and collection. Deduplication by
+// (freq, sf) with TAP_FREQ_TOL tolerance — duplicate hits refresh the
+// timestamp rather than adding a new entry.
+//
+// Sub-GHz and 2.4 GHz use independent hit arrays so cross-band contamination
+// cannot create false FHSS spread detections.
 
-static const uint8_t FHSS_MAX_HITS_PER_CYCLE = 16;
+static const uint8_t FHSS_MAX_HITS = 96;
 
-struct FhssHit { float freq; uint8_t sf; };
-struct FhssCycleSlot { FhssHit hits[FHSS_MAX_HITS_PER_CYCLE]; uint8_t count; };
+struct FhssHit { float freq; uint8_t sf; uint32_t tsMs; bool active; };
 
-static FhssCycleSlot fhssWindow[FHSS_WINDOW_CYCLES];
-static uint8_t fhssWindowIdx = 0;
+static FhssHit fhssHitsSubGHz[FHSS_MAX_HITS];
+#ifdef BOARD_T3S3_LR1121
+static FhssHit fhssHits24[FHSS_MAX_HITS];
+#endif
 
-static void fhssCycleAdvance() {
-    fhssWindowIdx = (fhssWindowIdx + 1) % FHSS_WINDOW_CYCLES;
-    fhssWindow[fhssWindowIdx].count = 0;
-}
-
-static void fhssRecordHit(float freq, uint8_t sf) {
-    FhssCycleSlot& slot = fhssWindow[fhssWindowIdx];
-    for (uint8_t i = 0; i < slot.count; i++) {
-        if (slot.hits[i].sf == sf &&
-            fabsf(slot.hits[i].freq - freq) <= TAP_FREQ_TOL) return;
-    }
-    if (slot.count < FHSS_MAX_HITS_PER_CYCLE) {
-        slot.hits[slot.count].freq = freq;
-        slot.hits[slot.count].sf = sf;
-        slot.count++;
-    }
-}
-
-// Collect unique (freq,sf) across the window. Returns count written to out[].
-static uint8_t fhssCollectUnique(FhssHit* out, uint8_t outMax) {
-    uint8_t n = 0;
-    for (uint8_t c = 0; c < FHSS_WINDOW_CYCLES; c++) {
-        const FhssCycleSlot& slot = fhssWindow[c];
-        for (uint8_t i = 0; i < slot.count; i++) {
-            bool dup = false;
-            for (uint8_t j = 0; j < n; j++) {
-                if (out[j].sf == slot.hits[i].sf &&
-                    fabsf(out[j].freq - slot.hits[i].freq) <= TAP_FREQ_TOL) {
-                    dup = true; break;
-                }
-            }
-            if (!dup && n < outMax) {
-                out[n].freq = slot.hits[i].freq;
-                out[n].sf = slot.hits[i].sf;
-                n++;
-            }
+// Prune hits older than FHSS_WINDOW_MS. Call from add and collect.
+static void fhssPruneExpired(FhssHit* hits) {
+    uint32_t now = millis();
+    for (uint8_t i = 0; i < FHSS_MAX_HITS; i++) {
+        if (hits[i].active && (uint32_t)(now - hits[i].tsMs) > FHSS_WINDOW_MS) {
+            hits[i].active = false;
         }
+    }
+}
+
+// Insert or refresh a hit. Duplicate (within TAP_FREQ_TOL on same SF) refreshes
+// timestamp. If array is full, the insert is dropped silently — this is fine
+// because we only care about unique count, not every individual hit.
+static void fhssRecordHitGeneric(FhssHit* hits, float freq, uint8_t sf) {
+    fhssPruneExpired(hits);
+    uint32_t now = millis();
+    for (uint8_t i = 0; i < FHSS_MAX_HITS; i++) {
+        if (hits[i].active && hits[i].sf == sf &&
+            fabsf(hits[i].freq - freq) <= TAP_FREQ_TOL) {
+            hits[i].tsMs = now;
+            return;
+        }
+    }
+    for (uint8_t i = 0; i < FHSS_MAX_HITS; i++) {
+        if (!hits[i].active) {
+            hits[i].freq = freq;
+            hits[i].sf = sf;
+            hits[i].tsMs = now;
+            hits[i].active = true;
+            return;
+        }
+    }
+}
+
+static void fhssRecordHitSubGHz(float freq, uint8_t sf) {
+    fhssRecordHitGeneric(fhssHitsSubGHz, freq, sf);
+}
+
+#ifdef BOARD_T3S3_LR1121
+static void fhssRecordHit24(float freq, uint8_t sf) {
+    fhssRecordHitGeneric(fhssHits24, freq, sf);
+}
+#endif
+
+// Collect unique active hits into out[]. Returns count written.
+static uint8_t fhssCollectUnique(FhssHit* hits, FhssHit* out, uint8_t outMax) {
+    fhssPruneExpired(hits);
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < FHSS_MAX_HITS && n < outMax; i++) {
+        if (!hits[i].active) continue;
+        out[n] = hits[i];
+        n++;
     }
     return n;
 }
 
-// Call after Phase 2a completes. Uses a baseline-delta discriminator: track
-// the steady-state unique-frequency count from infrastructure, then only fire
-// when the count INCREASES by FHSS_UNIQUE_THRESHOLD — indicating new FHSS
-// activity on top of the existing environment. This scales regardless of how
-// many infrastructure channels exist.
+// Call after sub-GHz scan completes. Uses a baseline-delta discriminator.
 static uint8_t fhssFlushSpread() {
     static uint8_t baselineFhssUnique = 0;
     static uint8_t baselineCalibCycles = 0;
     static const uint8_t BASELINE_CALIB_N = 5;
 
-    FhssHit uniq[FHSS_WINDOW_CYCLES * FHSS_MAX_HITS_PER_CYCLE];
-    uint8_t uniqCount = fhssCollectUnique(uniq, sizeof(uniq) / sizeof(uniq[0]));
+    FhssHit uniq[FHSS_MAX_HITS];
+    uint8_t uniqCount = fhssCollectUnique(fhssHitsSubGHz, uniq, FHSS_MAX_HITS);
 
     if (!warmupComplete) return 0;
 
-    // Baseline calibration: first BASELINE_CALIB_N post-warmup cycles track
-    // the MAX unique count to avoid locking in a low snapshot that the
-    // actual steady-state infrastructure exceeds. After calibration,
-    // switch to symmetric slow adaptation.
     if (baselineCalibCycles < BASELINE_CALIB_N) {
         if (uniqCount > baselineFhssUnique) baselineFhssUnique = uniqCount;
         baselineCalibCycles++;
         return 0;
     }
 
-    // Symmetric slow adaptation (1/cycle). Baseline drifts with the
-    // environment in both directions, but a sudden spike ≥threshold is
-    // treated as a drone — baseline holds.
     if (uniqCount < baselineFhssUnique) {
         baselineFhssUnique--;
     } else if (uniqCount > baselineFhssUnique &&
@@ -477,12 +499,11 @@ static uint8_t fhssFlushSpread() {
         baselineFhssUnique++;
     }
 
-    // Only fire when unique count exceeds baseline by threshold
     if (uniqCount < baselineFhssUnique + FHSS_UNIQUE_THRESHOLD) return 0;
 
     uint8_t fired = 0;
     for (uint8_t i = 0; i < uniqCount; i++) {
-        recordDiversityHit(uniq[i].freq, uniq[i].sf);
+        recordDiversityHit(subGHzTracker, uniq[i].freq, uniq[i].sf);
         fired++;
     }
     if (fired > 0) {
@@ -491,6 +512,46 @@ static uint8_t fhssFlushSpread() {
     }
     return fired;
 }
+
+#ifdef BOARD_T3S3_LR1121
+// 2.4 GHz FHSS spread flush — independent baseline, feeds band24Tracker.
+static uint8_t fhssFlushSpread24() {
+    static uint8_t baselineFhssUnique = 0;
+    static uint8_t baselineCalibCycles = 0;
+    static const uint8_t BASELINE_CALIB_N = 5;
+
+    FhssHit uniq[FHSS_MAX_HITS];
+    uint8_t uniqCount = fhssCollectUnique(fhssHits24, uniq, FHSS_MAX_HITS);
+
+    if (!warmupComplete) return 0;
+
+    if (baselineCalibCycles < BASELINE_CALIB_N) {
+        if (uniqCount > baselineFhssUnique) baselineFhssUnique = uniqCount;
+        baselineCalibCycles++;
+        return 0;
+    }
+
+    if (uniqCount < baselineFhssUnique) {
+        baselineFhssUnique--;
+    } else if (uniqCount > baselineFhssUnique &&
+               uniqCount < baselineFhssUnique + FHSS_UNIQUE_THRESHOLD) {
+        baselineFhssUnique++;
+    }
+
+    if (uniqCount < baselineFhssUnique + FHSS_UNIQUE_THRESHOLD) return 0;
+
+    uint8_t fired = 0;
+    for (uint8_t i = 0; i < uniqCount; i++) {
+        recordDiversityHit(band24Tracker, uniq[i].freq, uniq[i].sf);
+        fired++;
+    }
+    if (fired > 0) {
+        Serial.printf("[FHSS-SPREAD-2G4] %u unique (baseline=%u) -> diversity fired\n",
+                      uniqCount, baselineFhssUnique);
+    }
+    return fired;
+}
+#endif
 
 // ── Tap list management ─────────────────────────────────────────────────────
 
@@ -503,27 +564,32 @@ bool cadHwFault() {
 }
 
 void resetDiversityTracker() {
-    memset(diversitySlots, 0, sizeof(diversitySlots));
-    memset(velocityHistory, 0, sizeof(velocityHistory));
-    velocityIdx = 0;
-    sustainedDiversityCycles = 0;
-    prevSustainedDiversityCycles = 0;
-    sustainedStartMs = 0;
-    memset(fhssWindow, 0, sizeof(fhssWindow));
-    fhssWindowIdx = 0;
+    memset(subGHzTracker.diversitySlots, 0, sizeof(subGHzTracker.diversitySlots));
+    memset(subGHzTracker.velocitySamples, 0, sizeof(subGHzTracker.velocitySamples));
+    subGHzTracker.velocityIdx = 0;
+    subGHzTracker.sustainedDiversityCycles = 0;
+    subGHzTracker.prevSustainedDiversityCycles = 0;
+    subGHzTracker.sustainedStartMs = 0;
+#ifdef BOARD_T3S3_LR1121
+    memset(band24Tracker.diversitySlots, 0, sizeof(band24Tracker.diversitySlots));
+    memset(band24Tracker.velocitySamples, 0, sizeof(band24Tracker.velocitySamples));
+    band24Tracker.velocityIdx = 0;
+    band24Tracker.sustainedDiversityCycles = 0;
+    band24Tracker.prevSustainedDiversityCycles = 0;
+    band24Tracker.sustainedStartMs = 0;
+    memset(fhssHits24, 0, sizeof(fhssHits24));
+#endif
+    memset(fhssHitsSubGHz, 0, sizeof(fhssHitsSubGHz));
 }
 
 void cadScannerInit() {
-    memset(tapList, 0, sizeof(tapList));
+    memset(&subGHzTracker, 0, sizeof(subGHzTracker));
+#ifdef BOARD_T3S3_LR1121
+    memset(&band24Tracker, 0, sizeof(band24Tracker));
+    memset(fhssHits24, 0, sizeof(fhssHits24));
+#endif
     memset(ambientTaps, 0, sizeof(ambientTaps));
-    memset(diversitySlots, 0, sizeof(diversitySlots));
-    memset(velocityHistory, 0, sizeof(velocityHistory));
-    velocityIdx = 0;
-    sustainedDiversityCycles = 0;
-    prevSustainedDiversityCycles = 0;
-    sustainedStartMs = 0;
-    memset(fhssWindow, 0, sizeof(fhssWindow));
-    fhssWindowIdx = 0;
+    memset(fhssHitsSubGHz, 0, sizeof(fhssHitsSubGHz));
     ambientTapCount = 0;
     warmupCycleCount = 0;
     warmupComplete = false;
@@ -537,51 +603,51 @@ void cadScannerInit() {
     rotSF6 = rotSF7 = rotSF8 = rotSF9 = rotSF10 = rotSF11 = rotSF12 = rotFSK = 0;
 }
 
-static CadTap* findTap(float freq, uint8_t sf) {
+static CadTap* findTap(BandTracker& t, float freq, uint8_t sf) {
     for (int i = 0; i < MAX_TAPS; i++) {
-        if (tapList[i].active &&
-            tapList[i].sf == sf &&
-            fabsf(tapList[i].frequency - freq) < TAP_FREQ_TOL) {
-            return &tapList[i];
+        if (t.taps[i].active &&
+            t.taps[i].sf == sf &&
+            fabsf(t.taps[i].frequency - freq) < TAP_FREQ_TOL) {
+            return &t.taps[i];
         }
     }
     return nullptr;
 }
 
-static CadTap* addTap(float freq, uint8_t sf, RfBand band = BAND_SUB_GHZ) {
+static CadTap* addTap(BandTracker& t, float freq, uint8_t sf, RfBand band = BAND_SUB_GHZ) {
     for (int i = 0; i < MAX_TAPS; i++) {
-        if (!tapList[i].active) {
-            tapList[i].frequency = freq;
-            tapList[i].sf = sf;
-            tapList[i].band = band;
-            tapList[i].isFsk = false;
-            tapList[i].isAmbient = false;
-            tapList[i].consecutiveHits = 1;
-            tapList[i].missCount = 0;
-            tapList[i].firstSeenMs = millis();
-            tapList[i].firstConfirmedMs = 0;
-            tapList[i].lastSeenMs = millis();
-            tapList[i].active = true;
-            return &tapList[i];
+        if (!t.taps[i].active) {
+            t.taps[i].frequency = freq;
+            t.taps[i].sf = sf;
+            t.taps[i].band = band;
+            t.taps[i].isFsk = false;
+            t.taps[i].isAmbient = false;
+            t.taps[i].consecutiveHits = 1;
+            t.taps[i].missCount = 0;
+            t.taps[i].firstSeenMs = millis();
+            t.taps[i].firstConfirmedMs = 0;
+            t.taps[i].lastSeenMs = millis();
+            t.taps[i].active = true;
+            return &t.taps[i];
         }
     }
     return nullptr;
 }
 
-static CadTap* addFskTap(float freq) {
+static CadTap* addFskTap(BandTracker& t, float freq) {
     for (int i = 0; i < MAX_TAPS; i++) {
-        if (!tapList[i].active) {
-            tapList[i].frequency = freq;
-            tapList[i].sf = 0;
-            tapList[i].isFsk = true;
-            tapList[i].isAmbient = false;
-            tapList[i].consecutiveHits = 1;
-            tapList[i].missCount = 0;
-            tapList[i].firstSeenMs = millis();
-            tapList[i].firstConfirmedMs = 0;
-            tapList[i].lastSeenMs = millis();
-            tapList[i].active = true;
-            return &tapList[i];
+        if (!t.taps[i].active) {
+            t.taps[i].frequency = freq;
+            t.taps[i].sf = 0;
+            t.taps[i].isFsk = true;
+            t.taps[i].isAmbient = false;
+            t.taps[i].consecutiveHits = 1;
+            t.taps[i].missCount = 0;
+            t.taps[i].firstSeenMs = millis();
+            t.taps[i].firstConfirmedMs = 0;
+            t.taps[i].lastSeenMs = millis();
+            t.taps[i].active = true;
+            return &t.taps[i];
         }
     }
     return nullptr;
@@ -603,28 +669,38 @@ static void tapMiss(CadTap* tap) {
     }
 }
 
-static void countConfirmed(int& cadCount, int& fskCount, int& strongPending, int& pending, int& totalActive) {
+static void countConfirmed(BandTracker& t, int& cadCount, int& fskCount, int& strongPending, int& pending, int& totalActive) {
     cadCount = 0; fskCount = 0; strongPending = 0; pending = 0; totalActive = 0;
     unsigned long now = millis();
     for (int i = 0; i < MAX_TAPS; i++) {
-        if (!tapList[i].active) continue;
+        if (!t.taps[i].active) continue;
         // Skip ambient taps from all counts that feed threat escalation
-        if (tapList[i].isAmbient) continue;
+        if (t.taps[i].isAmbient) continue;
         totalActive++;
         // Time-based persistence: a tap only counts as confirmed when it has
         // held the confirmation state for PERSISTENCE_MIN_MS wall-clock time.
         // Gives board-parity timing regardless of scan cycle speed.
-        bool timeConfirmed = (tapList[i].firstConfirmedMs != 0) &&
-                             ((now - tapList[i].firstConfirmedMs) >= PERSISTENCE_MIN_MS);
-        if (tapList[i].consecutiveHits >= TAP_CONFIRM_HITS && timeConfirmed) {
-            if (tapList[i].isFsk) fskCount++;
+        bool timeConfirmed = (t.taps[i].firstConfirmedMs != 0) &&
+                             ((now - t.taps[i].firstConfirmedMs) >= PERSISTENCE_MIN_MS);
+        if (t.taps[i].consecutiveHits >= TAP_CONFIRM_HITS && timeConfirmed) {
+            if (t.taps[i].isFsk) fskCount++;
             else cadCount++;
-        } else if (tapList[i].consecutiveHits >= 2 && !tapList[i].isFsk) {
+        } else if (t.taps[i].consecutiveHits >= 2 && !t.taps[i].isFsk) {
             strongPending++;
         } else {
             pending++;
         }
     }
+}
+
+// Populate a CadBandSummary from a tracker at the end of a scan cycle.
+static void fillBandSummary(BandTracker& t, CadBandSummary& s) {
+    countConfirmed(t, s.confirmedCadCount, s.confirmedFskCount,
+                   s.strongPendingCad, s.pendingTaps, s.totalActiveTaps);
+    s.diversityCount = countDiversity(t, DIVERSITY_WINDOW_MS);
+    s.persistentDiversityCount = countPersistentDiversity(t, DIVERSITY_WINDOW_MS);
+    s.diversityVelocity = computeDiversityVelocity(t);
+    s.sustainedCycles = getSustainedDiversityCycles(t);
 }
 
 // ── LoRa ↔ FSK mode switching ────────────────────────────────────────────────
@@ -709,54 +785,55 @@ static uint32_t rot24SF7 = 0;
 static uint32_t rot24SF8 = 0;
 
 CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult* rssi) {
-    CadFskResult result = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    CadFskResult result = {};
     latestSweep = rssi;
     cadErrorsThisCycle = 0;
     cadProbesThisCycle = 0;
     cadFirstError = 0;
 
-    diversityCycleUpdate();
-    pruneExpiredDiversity();
-    fhssCycleAdvance();
+    diversityCycleUpdate(subGHzTracker);
+    diversityCycleUpdate(band24Tracker);
+    pruneExpiredDiversity(subGHzTracker);
+    pruneExpiredDiversity(band24Tracker);
+    // FHSS window is time-based now — hits expire by timestamp, no cycle advance needed
 
     // ── Enter LoRa mode for CAD scanning ──────────────────────────────
     ensureLoRa_LR(radio);
 
     // ── PHASE 1: Priority re-check active sub-GHz LoRa taps ──────────
     for (int i = 0; i < MAX_TAPS; i++) {
-        if (!tapList[i].active || tapList[i].isFsk) continue;
-        if (tapList[i].band == BAND_2G4) continue;  // 2.4 GHz taps re-checked in Phase 2b
-        radio.setSpreadingFactor(tapList[i].sf);
-        ChannelScanConfig_t cfg = buildCadConfigLR(tapList[i].sf);
-        radio.setFrequency(tapList[i].frequency);
+        if (!subGHzTracker.taps[i].active || subGHzTracker.taps[i].isFsk) continue;
+        radio.setSpreadingFactor(subGHzTracker.taps[i].sf);
+        ChannelScanConfig_t cfg = buildCadConfigLR(subGHzTracker.taps[i].sf);
+        radio.setFrequency(subGHzTracker.taps[i].frequency);
         int16_t cadResult = radio.scanChannel(cfg);
         countCadProbe(cadResult);
         if (cadResult == RADIOLIB_LORA_DETECTED) {
-            tapHit(&tapList[i]);
-            if (tapList[i].consecutiveHits >= 2 &&
-                !isAmbientFrequency(tapList[i].frequency, tapList[i].sf))
-                recordDiversityHit(tapList[i].frequency, tapList[i].sf);
+            tapHit(&subGHzTracker.taps[i]);
+            if (subGHzTracker.taps[i].consecutiveHits >= 2 &&
+                !isAmbientFrequency(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf))
+                recordDiversityHit(subGHzTracker, subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf);
         } else {
             // Adjacent channel check
             bool adjHit = false;
             float spacing = 0.325f;
             for (float delta : {-spacing, spacing}) {
-                float adjFreq = tapList[i].frequency + delta;
+                float adjFreq = subGHzTracker.taps[i].frequency + delta;
                 if (adjFreq >= 902.0f && adjFreq <= 928.0f) {
                     radio.setFrequency(adjFreq);
                     int16_t adjResult = radio.scanChannel(cfg);
                     countCadProbe(adjResult);
                     if (adjResult == RADIOLIB_LORA_DETECTED) {
-                        tapHit(&tapList[i]);
-                        if (tapList[i].consecutiveHits >= 2 &&
-                            !isAmbientFrequency(adjFreq, tapList[i].sf))
-                            recordDiversityHit(adjFreq, tapList[i].sf);
+                        tapHit(&subGHzTracker.taps[i]);
+                        if (subGHzTracker.taps[i].consecutiveHits >= 2 &&
+                            !isAmbientFrequency(adjFreq, subGHzTracker.taps[i].sf))
+                            recordDiversityHit(subGHzTracker, adjFreq, subGHzTracker.taps[i].sf);
                         adjHit = true;
                         break;
                     }
                 }
             }
-            if (!adjHit) tapMiss(&tapList[i]);
+            if (!adjHit) tapMiss(&subGHzTracker.taps[i]);
         }
     }
 
@@ -790,14 +867,14 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
                 int16_t cadResult = radio.scanChannel(cfg6);
                 countCadProbe(cadResult);
                 if (cadResult == RADIOLIB_LORA_DETECTED) {
-                    CadTap* existing = findTap(freq, 6);
+                    CadTap* existing = findTap(subGHzTracker, freq, 6);
                     if (existing) {
                         tapHit(existing);
                         if (existing->consecutiveHits >= 2 &&
                             !isAmbientFrequency(freq, 6))
-                            recordDiversityHit(freq, 6);
+                            recordDiversityHit(subGHzTracker, freq, 6);
                     } else {
-                        addTap(freq, 6, BAND_SUB_GHZ);
+                        addTap(subGHzTracker, freq, 6, BAND_SUB_GHZ);
                     }
                 }
                 guidedScans++;
@@ -808,32 +885,33 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
     // ── PHASE 2a: Broad sub-GHz CAD scan — SF6-SF12 rotating channels ─
     // Count confirmed taps FROM THIS CYCLE's Phase 1 hits so pursuit mode
     // reacts on the same cycle the drone is first seen (was 1 cycle late).
-    countConfirmed(result.confirmedCadCount, result.confirmedFskCount,
-                   result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
+    int phase2aCadCount, phase2aFskCount, phase2aStrongPending, phase2aPending, phase2aTotal;
+    countConfirmed(subGHzTracker, phase2aCadCount, phase2aFskCount,
+                   phase2aStrongPending, phase2aPending, phase2aTotal);
     static bool lastPursuitMode = false;
-    bool pursuitMode = (countDiversity(DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
-                       || (result.confirmedCadCount > 0);
+    bool pursuitMode = (countDiversity(subGHzTracker, DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
+                       || (phase2aCadCount > 0);
     if (pursuitMode && !lastPursuitMode)
         Serial.println("[PURSUIT] Activated");
     else if (!pursuitMode && lastPursuitMode)
         Serial.println("[PURSUIT] Deactivated");
     lastPursuitMode = pursuitMode;
 
-    auto sfHasActiveTaps = [](uint8_t sf) -> bool {
+    auto sfHasActiveTapsSub = [](uint8_t sf) -> bool {
         for (int i = 0; i < MAX_TAPS; i++) {
-            if (tapList[i].active && !tapList[i].isFsk && tapList[i].sf == sf)
+            if (subGHzTracker.taps[i].active && !subGHzTracker.taps[i].isFsk && subGHzTracker.taps[i].sf == sf)
                 return true;
         }
         return false;
     };
 
-    int sf6ch  = pursuitMode && sfHasActiveTaps(6)  ? 80 : CAD_CH_SF6;
-    int sf7ch  = pursuitMode && sfHasActiveTaps(7)  ? 60 : CAD_CH_SF7;
-    int sf8ch  = pursuitMode && sfHasActiveTaps(8)  ? 30 : CAD_CH_SF8;
-    int sf9ch  = pursuitMode && !sfHasActiveTaps(9)  ? 2 : CAD_CH_SF9;
-    int sf10ch = pursuitMode && !sfHasActiveTaps(10) ? 1 : CAD_CH_SF10;
-    int sf11ch = pursuitMode && !sfHasActiveTaps(11) ? 1 : CAD_CH_SF11;
-    int sf12ch = pursuitMode && !sfHasActiveTaps(12) ? 1 : CAD_CH_SF12;
+    int sf6ch  = pursuitMode && sfHasActiveTapsSub(6)  ? 80 : CAD_CH_SF6;
+    int sf7ch  = pursuitMode && sfHasActiveTapsSub(7)  ? 60 : CAD_CH_SF7;
+    int sf8ch  = pursuitMode && sfHasActiveTapsSub(8)  ? 30 : CAD_CH_SF8;
+    int sf9ch  = pursuitMode && !sfHasActiveTapsSub(9)  ? 2 : CAD_CH_SF9;
+    int sf10ch = pursuitMode && !sfHasActiveTapsSub(10) ? 1 : CAD_CH_SF10;
+    int sf11ch = pursuitMode && !sfHasActiveTapsSub(11) ? 1 : CAD_CH_SF11;
+    int sf12ch = pursuitMode && !sfHasActiveTapsSub(12) ? 1 : CAD_CH_SF12;
 
     struct SFScan {
         uint8_t sf; int chCount; int totalCh; uint32_t* rot;
@@ -868,15 +946,18 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
             int16_t cadResult = radio.scanChannel(cfg);
             countCadProbe(cadResult);
             if (cadResult == RADIOLIB_LORA_DETECTED) {
-                CadTap* existing = findTap(freq, sc.sf);
-                if (!existing) addTap(freq, sc.sf, BAND_SUB_GHZ);
+                CadTap* existing = findTap(subGHzTracker, freq, sc.sf);
+                if (!existing) addTap(subGHzTracker, freq, sc.sf, BAND_SUB_GHZ);
                 if (existing && existing->consecutiveHits >= 2 &&
                     !isAmbientFrequency(freq, sc.sf))
-                    recordDiversityHit(freq, sc.sf);
-                fhssRecordHit(freq, sc.sf);
+                    recordDiversityHit(subGHzTracker, freq, sc.sf);
+                fhssRecordHitSubGHz(freq, sc.sf);
             }
         }
     }
+
+    // Flush sub-GHz FHSS frequency-spread tracker before moving to 2.4 GHz.
+    fhssFlushSpread();
 
     // ── PHASE 2b: 2.4 GHz CAD scan — SF6-SF8, BW800 ──────────────────
     // LR1121 handles band switching transparently via setFrequency().
@@ -888,21 +969,20 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
     // Tracer all use BW800). See LR11x0.cpp:516 for the range check.
     radio.setBandwidth(812.5, true);
 
-    // Re-check active 2.4 GHz taps first
+    // Re-check active 2.4 GHz taps first (band24Tracker contains only 2.4 GHz)
     for (int i = 0; i < MAX_TAPS; i++) {
-        if (!tapList[i].active || tapList[i].isFsk) continue;
-        if (tapList[i].band != BAND_2G4) continue;
-        radio.setSpreadingFactor(tapList[i].sf);
-        ChannelScanConfig_t cfg24 = buildCadConfigLR(tapList[i].sf);
-        radio.setFrequency(tapList[i].frequency);
+        if (!band24Tracker.taps[i].active || band24Tracker.taps[i].isFsk) continue;
+        radio.setSpreadingFactor(band24Tracker.taps[i].sf);
+        ChannelScanConfig_t cfg24 = buildCadConfigLR(band24Tracker.taps[i].sf);
+        radio.setFrequency(band24Tracker.taps[i].frequency);
         int16_t cadResult = radio.scanChannel(cfg24);
         countCadProbe(cadResult);
         if (cadResult == RADIOLIB_LORA_DETECTED) {
-            tapHit(&tapList[i]);
-            if (tapList[i].consecutiveHits >= 2)
-                recordDiversityHit(tapList[i].frequency, tapList[i].sf);
+            tapHit(&band24Tracker.taps[i]);
+            if (band24Tracker.taps[i].consecutiveHits >= 2)
+                recordDiversityHit(band24Tracker, band24Tracker.taps[i].frequency, band24Tracker.taps[i].sf);
         } else {
-            tapMiss(&tapList[i]);
+            tapMiss(&band24Tracker.taps[i]);
         }
     }
 
@@ -935,27 +1015,26 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
             int16_t cadResult = radio.scanChannel(cfg24b);
             countCadProbe(cadResult);
             if (cadResult == RADIOLIB_LORA_DETECTED) {
-                CadTap* existing = findTap(freq, sc.sf);
-                if (!existing) addTap(freq, sc.sf, BAND_2G4);
+                CadTap* existing = findTap(band24Tracker, freq, sc.sf);
+                if (!existing) addTap(band24Tracker, freq, sc.sf, BAND_2G4);
                 if (existing && existing->consecutiveHits >= 2)
-                    recordDiversityHit(freq, sc.sf);
-                // Feed 2.4 GHz CAD hits into the FHSS spread tracker so it can
-                // detect 2.4 GHz FHSS drones (ELRS 2.4, Ghost, Tracer).
-                fhssRecordHit(freq, sc.sf);
+                    recordDiversityHit(band24Tracker, freq, sc.sf);
+                // Feed 2.4 GHz CAD hits into the 2.4 GHz FHSS spread tracker.
+                fhssRecordHit24(freq, sc.sf);
             }
         }
     }
     }
 
-    // Flush FHSS frequency-spread tracker (after both Phase 2a and Phase 2b
-    // so 2.4 GHz hits feed the same cycle they're recorded).
-    fhssFlushSpread();
+    // Flush 2.4 GHz FHSS frequency-spread tracker.
+    fhssFlushSpread24();
 
     // ── PHASE 4: Switch back to GFSK for RSSI sweep ──────────────────
     ensureGFSK_LR(radio);
 
     // ── PHASE 3: FSK Crossfire scan ──────────────────────────────────
     // Radio is in GFSK mode. Reconfigure for Crossfire 150 Hz detection.
+    // FSK taps live in subGHzTracker (Crossfire is ~900 MHz band).
     {
         int16_t fskErr = radio.setBitRate(85.1);
         if (fskErr == RADIOLIB_ERR_NONE) {
@@ -964,13 +1043,13 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
 
             // Re-check existing FSK taps
             for (int i = 0; i < MAX_TAPS; i++) {
-                if (!tapList[i].active || !tapList[i].isFsk) continue;
-                radio.setFrequency(tapList[i].frequency);
+                if (!subGHzTracker.taps[i].active || !subGHzTracker.taps[i].isFsk) continue;
+                radio.setFrequency(subGHzTracker.taps[i].frequency);
                 radio.startReceive();
                 delayMicroseconds(FSK_DWELL_US);
                 float r = radio.getInstantRSSI();
-                if (r > FSK_DETECT_THRESHOLD_DBM) tapHit(&tapList[i]);
-                else tapMiss(&tapList[i]);
+                if (r > FSK_DETECT_THRESHOLD_DBM) tapHit(&subGHzTracker.taps[i]);
+                else tapMiss(&subGHzTracker.taps[i]);
             }
 
             // Scan new Crossfire channels (rotating)
@@ -988,9 +1067,9 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
 
                 float r = radio.getInstantRSSI();
                 if (r > FSK_DETECT_THRESHOLD_DBM) {
-                    CadTap* existing = findTap(freq, 0);
+                    CadTap* existing = findTap(subGHzTracker, freq, 0);
                     if (existing) tapHit(existing);
-                    else addFskTap(freq);
+                    else addFskTap(subGHzTracker, freq);
                 }
             }
         }
@@ -1005,9 +1084,19 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
     // ── Warmup and ambient learning (shared with SX1262) ─────────────
     warmupCycleCount++;
 
+    // Need current totalActiveTaps (across both bands) for early-exit check
+    int totalActiveBothBands = 0;
+    {
+        int tmpCad, tmpFsk, tmpSP, tmpP, tmpTA;
+        countConfirmed(subGHzTracker, tmpCad, tmpFsk, tmpSP, tmpP, tmpTA);
+        totalActiveBothBands += tmpTA;
+        countConfirmed(band24Tracker, tmpCad, tmpFsk, tmpSP, tmpP, tmpTA);
+        totalActiveBothBands += tmpTA;
+    }
+
     if (!warmupComplete) {
         bool normalEnd = (millis() >= AMBIENT_WARMUP_MS);
-        bool earlyExit = (millis() >= AMBIENT_EARLY_EXIT_MS) && (result.totalActiveTaps == 0)
+        bool earlyExit = (millis() >= AMBIENT_EARLY_EXIT_MS) && (totalActiveBothBands == 0)
                          && (ambientTapCount == 0);
         if (normalEnd || earlyExit) {
             warmupComplete = true;
@@ -1026,8 +1115,11 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
             }
         } else {
             for (int i = 0; i < MAX_TAPS; i++) {
-                if (tapList[i].active && !tapList[i].isFsk) {
-                    recordAmbientTap(tapList[i].frequency, tapList[i].sf, true);
+                if (subGHzTracker.taps[i].active && !subGHzTracker.taps[i].isFsk) {
+                    recordAmbientTap(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf, true);
+                }
+                if (band24Tracker.taps[i].active && !band24Tracker.taps[i].isFsk) {
+                    recordAmbientTap(band24Tracker.taps[i].frequency, band24Tracker.taps[i].sf, true);
                 }
             }
         }
@@ -1036,16 +1128,20 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
     // Post-warmup continuous ambient learning
     if (warmupComplete) {
         unsigned long now = millis();
-        for (int i = 0; i < MAX_TAPS; i++) {
-            if (tapList[i].active &&
-                !tapList[i].isFsk &&
-                tapList[i].consecutiveHits >= TAP_CONFIRM_HITS &&
-                !isAmbientCadSource(tapList[i].frequency, tapList[i].sf)) {
-                if (tapList[i].firstSeenMs < AMBIENT_WARMUP_MS) {
-                    recordAmbientTap(tapList[i].frequency, tapList[i].sf, true);
-                }
-                else if ((now - tapList[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
-                    recordAmbientTap(tapList[i].frequency, tapList[i].sf, false);
+        BandTracker* trackers[] = { &subGHzTracker, &band24Tracker };
+        for (BandTracker* tp : trackers) {
+            BandTracker& tk = *tp;
+            for (int i = 0; i < MAX_TAPS; i++) {
+                if (tk.taps[i].active &&
+                    !tk.taps[i].isFsk &&
+                    tk.taps[i].consecutiveHits >= TAP_CONFIRM_HITS &&
+                    !isAmbientCadSource(tk.taps[i].frequency, tk.taps[i].sf)) {
+                    if (tk.taps[i].firstSeenMs < AMBIENT_WARMUP_MS) {
+                        recordAmbientTap(tk.taps[i].frequency, tk.taps[i].sf, true);
+                    }
+                    else if ((now - tk.taps[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
+                        recordAmbientTap(tk.taps[i].frequency, tk.taps[i].sf, false);
+                    }
                 }
             }
         }
@@ -1053,9 +1149,13 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
 
     // Tag taps with ambient status
     if (warmupComplete) {
-        for (int i = 0; i < MAX_TAPS; i++) {
-            if (tapList[i].active) {
-                tapList[i].isAmbient = isAmbientCadSource(tapList[i].frequency, tapList[i].sf);
+        BandTracker* trackers[] = { &subGHzTracker, &band24Tracker };
+        for (BandTracker* tp : trackers) {
+            BandTracker& tk = *tp;
+            for (int i = 0; i < MAX_TAPS; i++) {
+                if (tk.taps[i].active) {
+                    tk.taps[i].isAmbient = isAmbientCadSource(tk.taps[i].frequency, tk.taps[i].sf);
+                }
             }
         }
     }
@@ -1076,12 +1176,22 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
         }
     }
 
-    countConfirmed(result.confirmedCadCount, result.confirmedFskCount,
-                   result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
-    result.diversityCount = countDiversity(DIVERSITY_WINDOW_MS);
-    result.persistentDiversityCount = countPersistentDiversity(DIVERSITY_WINDOW_MS);
-    result.diversityVelocity = computeDiversityVelocity();
-    result.sustainedCycles = getSustainedDiversityCycles();
+    // Fill per-band summaries from each tracker
+    fillBandSummary(subGHzTracker, result.subGHz);
+    fillBandSummary(band24Tracker, result.band24);
+
+    // Aggregate totals for backward compat with main.cpp / detection_engine
+    result.confirmedCadCount       = result.subGHz.confirmedCadCount       + result.band24.confirmedCadCount;
+    result.confirmedFskCount       = result.subGHz.confirmedFskCount       + result.band24.confirmedFskCount;
+    result.strongPendingCad        = result.subGHz.strongPendingCad        + result.band24.strongPendingCad;
+    result.pendingTaps             = result.subGHz.pendingTaps             + result.band24.pendingTaps;
+    result.totalActiveTaps         = result.subGHz.totalActiveTaps         + result.band24.totalActiveTaps;
+    result.diversityCount          = result.subGHz.diversityCount          + result.band24.diversityCount;
+    result.persistentDiversityCount= result.subGHz.persistentDiversityCount+ result.band24.persistentDiversityCount;
+    result.diversityVelocity       = result.subGHz.diversityVelocity       + result.band24.diversityVelocity;
+    // Sustained cycles: take the max of the two bands (not sum)
+    result.sustainedCycles         = (result.subGHz.sustainedCycles > result.band24.sustainedCycles)
+                                     ? result.subGHz.sustainedCycles : result.band24.sustainedCycles;
 
     return result;
 }
@@ -1089,55 +1199,55 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
 #else // SX1262 boards
 
 CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi) {
-    CadFskResult result = {0, 0, 0, 0, 0, 0, 0, 0};
+    CadFskResult result = {};
     latestSweep = rssi;
     cadErrorsThisCycle = 0;
     cadProbesThisCycle = 0;
 
     // Update persistence counters from previous cycle's hits, then clear flags
-    diversityCycleUpdate();
+    diversityCycleUpdate(subGHzTracker);
 
     // Housekeeping: prune expired diversity slots
-    pruneExpiredDiversity();
-    fhssCycleAdvance();
+    pruneExpiredDiversity(subGHzTracker);
+    // FHSS window is time-based now — hits expire by timestamp, no cycle advance needed
 
     // Switch from FSK to LoRa packet type via low-level SPI command
     ensureLoRa(radio);
 
     // ── PHASE 1: Priority re-check active LoRa taps + adjacent channels ──
     for (int i = 0; i < MAX_TAPS; i++) {
-        if (!tapList[i].active) continue;
-        if (tapList[i].isFsk) continue;  // FSK taps re-checked in Phase 3
-        radio.setSpreadingFactor(tapList[i].sf);
-        ChannelScanConfig_t cfg = buildCadConfig(tapList[i].sf);
-        radio.setFrequency(tapList[i].frequency);
+        if (!subGHzTracker.taps[i].active) continue;
+        if (subGHzTracker.taps[i].isFsk) continue;  // FSK taps re-checked in Phase 3
+        radio.setSpreadingFactor(subGHzTracker.taps[i].sf);
+        ChannelScanConfig_t cfg = buildCadConfig(subGHzTracker.taps[i].sf);
+        radio.setFrequency(subGHzTracker.taps[i].frequency);
         int16_t cadResult = radio.scanChannel(cfg);
         countCadProbe(cadResult);
         if (cadResult == RADIOLIB_LORA_DETECTED) {
-            tapHit(&tapList[i]);
-            if (tapList[i].consecutiveHits >= 2 &&
-                !isAmbientFrequency(tapList[i].frequency, tapList[i].sf))
-                recordDiversityHit(tapList[i].frequency, tapList[i].sf);
+            tapHit(&subGHzTracker.taps[i]);
+            if (subGHzTracker.taps[i].consecutiveHits >= 2 &&
+                !isAmbientFrequency(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf))
+                recordDiversityHit(subGHzTracker, subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf);
         } else {
             bool adjHit = false;
             float spacing = 0.325f;
             for (float delta : {-spacing, spacing}) {
-                float adjFreq = tapList[i].frequency + delta;
+                float adjFreq = subGHzTracker.taps[i].frequency + delta;
                 if (adjFreq >= 902.0f && adjFreq <= 928.0f) {
                     radio.setFrequency(adjFreq);
                     int16_t adjResult = radio.scanChannel(cfg);
                     countCadProbe(adjResult);
                     if (adjResult == RADIOLIB_LORA_DETECTED) {
-                        tapHit(&tapList[i]);
-                        if (tapList[i].consecutiveHits >= 2 &&
-                            !isAmbientFrequency(adjFreq, tapList[i].sf))
-                            recordDiversityHit(adjFreq, tapList[i].sf);
+                        tapHit(&subGHzTracker.taps[i]);
+                        if (subGHzTracker.taps[i].consecutiveHits >= 2 &&
+                            !isAmbientFrequency(adjFreq, subGHzTracker.taps[i].sf))
+                            recordDiversityHit(subGHzTracker, adjFreq, subGHzTracker.taps[i].sf);
                         adjHit = true;
                         break;
                     }
                 }
             }
-            if (!adjHit) tapMiss(&tapList[i]);
+            if (!adjHit) tapMiss(&subGHzTracker.taps[i]);
         }
     }
 
@@ -1174,14 +1284,14 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                 int16_t cadResult = radio.scanChannel(cfg6);
                 countCadProbe(cadResult);
                 if (cadResult == RADIOLIB_LORA_DETECTED) {
-                    CadTap* existing = findTap(freq, 6);
+                    CadTap* existing = findTap(subGHzTracker, freq, 6);
                     if (existing) {
                         tapHit(existing);
                         if (existing->consecutiveHits >= 2 &&
                             !isAmbientFrequency(freq, 6))
-                            recordDiversityHit(freq, 6);
+                            recordDiversityHit(subGHzTracker, freq, 6);
                     } else {
-                        addTap(freq, 6);
+                        addTap(subGHzTracker, freq, 6);
                     }
                 }
                 guidedScans++;
@@ -1193,11 +1303,12 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     // Pursuit mode: when a drone is detected, focus on active SFs at max coverage.
     // Count confirmed taps FROM THIS CYCLE's Phase 1 hits so pursuit mode reacts
     // on the same cycle the drone is first seen (was 1 cycle late).
-    countConfirmed(result.confirmedCadCount, result.confirmedFskCount,
-                   result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
+    int phase2CadCount, phase2FskCount, phase2StrongPending, phase2Pending, phase2Total;
+    countConfirmed(subGHzTracker, phase2CadCount, phase2FskCount,
+                   phase2StrongPending, phase2Pending, phase2Total);
     static bool lastPursuitMode = false;
-    bool pursuitMode = (countDiversity(DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
-                       || (result.confirmedCadCount > 0);
+    bool pursuitMode = (countDiversity(subGHzTracker, DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
+                       || (phase2CadCount > 0);
     if (pursuitMode && !lastPursuitMode)
         Serial.println("[PURSUIT] Activated — focusing scan on active SFs");
     else if (!pursuitMode && lastPursuitMode)
@@ -1211,9 +1322,9 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
 
     // In pursuit mode, SFs WITH active taps get more channels; inactive SFs
     // get reduced. This prevents losing a drone on SF9 when pursuit fires.
-    auto sfHasActiveTaps = [](uint8_t sf) -> bool {
+    auto sfHasActiveTapsSub = [](uint8_t sf) -> bool {
         for (int i = 0; i < MAX_TAPS; i++) {
-            if (tapList[i].active && !tapList[i].isFsk && tapList[i].sf == sf)
+            if (subGHzTracker.taps[i].active && !subGHzTracker.taps[i].isFsk && subGHzTracker.taps[i].sf == sf)
                 return true;
         }
         return false;
@@ -1229,13 +1340,13 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
 
     if (pursuitMode) {
         // Boost SFs with active taps, reduce only inactive SFs
-        sf6ch  = sfHasActiveTaps(6)  ? 80 : CAD_CH_SF6;
-        sf7ch  = sfHasActiveTaps(7)  ? 60 : CAD_CH_SF7;
-        sf8ch  = sfHasActiveTaps(8)  ? 30 : CAD_CH_SF8;
-        sf9ch  = sfHasActiveTaps(9)  ? CAD_CH_SF9  : 2;
-        sf10ch = sfHasActiveTaps(10) ? CAD_CH_SF10 : 1;
-        sf11ch = sfHasActiveTaps(11) ? CAD_CH_SF11 : 1;
-        sf12ch = sfHasActiveTaps(12) ? CAD_CH_SF12 : 1;
+        sf6ch  = sfHasActiveTapsSub(6)  ? 80 : CAD_CH_SF6;
+        sf7ch  = sfHasActiveTapsSub(7)  ? 60 : CAD_CH_SF7;
+        sf8ch  = sfHasActiveTapsSub(8)  ? 30 : CAD_CH_SF8;
+        sf9ch  = sfHasActiveTapsSub(9)  ? CAD_CH_SF9  : 2;
+        sf10ch = sfHasActiveTapsSub(10) ? CAD_CH_SF10 : 1;
+        sf11ch = sfHasActiveTapsSub(11) ? CAD_CH_SF11 : 1;
+        sf12ch = sfHasActiveTapsSub(12) ? CAD_CH_SF12 : 1;
     }
 
     SFScan sfScans[] = {
@@ -1275,12 +1386,12 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
             int16_t cadResult = radio.scanChannel(cfg);
             countCadProbe(cadResult);
             if (cadResult == RADIOLIB_LORA_DETECTED) {
-                CadTap* existing = findTap(freq, sc.sf);
-                if (!existing) addTap(freq, sc.sf);
+                CadTap* existing = findTap(subGHzTracker, freq, sc.sf);
+                if (!existing) addTap(subGHzTracker, freq, sc.sf);
                 if (existing && existing->consecutiveHits >= 2 &&
                     !isAmbientFrequency(freq, sc.sf))
-                    recordDiversityHit(freq, sc.sf);
-                fhssRecordHit(freq, sc.sf);
+                    recordDiversityHit(subGHzTracker, freq, sc.sf);
+                fhssRecordHitSubGHz(freq, sc.sf);
             }
         }
     }
@@ -1304,13 +1415,13 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
 
             // Re-check existing FSK taps
             for (int i = 0; i < MAX_TAPS; i++) {
-                if (!tapList[i].active || !tapList[i].isFsk) continue;
-                radio.setFrequency(tapList[i].frequency);
+                if (!subGHzTracker.taps[i].active || !subGHzTracker.taps[i].isFsk) continue;
+                radio.setFrequency(subGHzTracker.taps[i].frequency);
                 radio.startReceive();
                 delayMicroseconds(FSK_DWELL_US);
                 float r = radio.getRSSI(false);
-                if (r > FSK_DETECT_THRESHOLD_DBM) tapHit(&tapList[i]);
-                else tapMiss(&tapList[i]);
+                if (r > FSK_DETECT_THRESHOLD_DBM) tapHit(&subGHzTracker.taps[i]);
+                else tapMiss(&subGHzTracker.taps[i]);
             }
 
             // Scan new Crossfire channels (rotating)
@@ -1329,9 +1440,9 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
 
                 float r = radio.getRSSI(false);
                 if (r > FSK_DETECT_THRESHOLD_DBM) {
-                    CadTap* existing = findTap(freq, 0);
+                    CadTap* existing = findTap(subGHzTracker, freq, 0);
                     if (existing) tapHit(existing);
-                    else addFskTap(freq);
+                    else addFskTap(subGHzTracker, freq);
                 }
             }
         }
@@ -1347,11 +1458,19 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     // ── Warmup: record taps as ambient LoRa sources ──────────────────────
     warmupCycleCount++;
 
+    // Compute current total for early-exit gate
+    int earlyExitTotal = 0;
+    {
+        int tmpCad, tmpFsk, tmpSP, tmpP, tmpTA;
+        countConfirmed(subGHzTracker, tmpCad, tmpFsk, tmpSP, tmpP, tmpTA);
+        earlyExitTotal = tmpTA;
+    }
+
     if (!warmupComplete) {
         bool normalEnd = (millis() >= AMBIENT_WARMUP_MS);
         // Early exit: after minimum warmup, if environment is clean (no active taps),
         // complete early to reduce blind time on power-on in clean field environments.
-        bool earlyExit = (millis() >= AMBIENT_EARLY_EXIT_MS) && (result.totalActiveTaps == 0)
+        bool earlyExit = (millis() >= AMBIENT_EARLY_EXIT_MS) && (earlyExitTotal == 0)
                          && (ambientTapCount == 0);
         if (normalEnd || earlyExit) {
             warmupComplete = true;
@@ -1373,8 +1492,8 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
             // Threshold is 1 hit (not 2 or 3) because ambient sources are
             // intermittent and may not accumulate consecutive hits in time.
             for (int i = 0; i < MAX_TAPS; i++) {
-                if (tapList[i].active && !tapList[i].isFsk) {
-                    recordAmbientTap(tapList[i].frequency, tapList[i].sf, true);
+                if (subGHzTracker.taps[i].active && !subGHzTracker.taps[i].isFsk) {
+                    recordAmbientTap(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf, true);
                 }
             }
         }
@@ -1384,15 +1503,15 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     if (warmupComplete) {
         unsigned long now = millis();
         for (int i = 0; i < MAX_TAPS; i++) {
-            if (tapList[i].active &&
-                !tapList[i].isFsk &&
-                tapList[i].consecutiveHits >= TAP_CONFIRM_HITS &&
-                !isAmbientCadSource(tapList[i].frequency, tapList[i].sf)) {
-                if (tapList[i].firstSeenMs < AMBIENT_WARMUP_MS) {
-                    recordAmbientTap(tapList[i].frequency, tapList[i].sf, true);
+            if (subGHzTracker.taps[i].active &&
+                !subGHzTracker.taps[i].isFsk &&
+                subGHzTracker.taps[i].consecutiveHits >= TAP_CONFIRM_HITS &&
+                !isAmbientCadSource(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf)) {
+                if (subGHzTracker.taps[i].firstSeenMs < AMBIENT_WARMUP_MS) {
+                    recordAmbientTap(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf, true);
                 }
-                else if ((now - tapList[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
-                    recordAmbientTap(tapList[i].frequency, tapList[i].sf, false);
+                else if ((now - subGHzTracker.taps[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
+                    recordAmbientTap(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf, false);
                 }
             }
         }
@@ -1401,8 +1520,8 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     // Tag each active tap with its ambient status
     if (warmupComplete) {
         for (int i = 0; i < MAX_TAPS; i++) {
-            if (tapList[i].active) {
-                tapList[i].isAmbient = isAmbientCadSource(tapList[i].frequency, tapList[i].sf);
+            if (subGHzTracker.taps[i].active) {
+                subGHzTracker.taps[i].isAmbient = isAmbientCadSource(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf);
             }
         }
     }
@@ -1423,11 +1542,19 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
         }
     }
 
-    countConfirmed(result.confirmedCadCount, result.confirmedFskCount, result.strongPendingCad, result.pendingTaps, result.totalActiveTaps);
-    result.diversityCount = countDiversity(DIVERSITY_WINDOW_MS);
-    result.persistentDiversityCount = countPersistentDiversity(DIVERSITY_WINDOW_MS);
-    result.diversityVelocity = computeDiversityVelocity();
-    result.sustainedCycles = getSustainedDiversityCycles();
+    // Fill the sub-GHz summary (SX1262 has no 2.4 GHz path)
+    fillBandSummary(subGHzTracker, result.subGHz);
+
+    // Aggregated totals mirror sub-GHz (no band24 on SX1262)
+    result.confirmedCadCount        = result.subGHz.confirmedCadCount;
+    result.confirmedFskCount        = result.subGHz.confirmedFskCount;
+    result.strongPendingCad         = result.subGHz.strongPendingCad;
+    result.pendingTaps              = result.subGHz.pendingTaps;
+    result.totalActiveTaps          = result.subGHz.totalActiveTaps;
+    result.diversityCount           = result.subGHz.diversityCount;
+    result.persistentDiversityCount = result.subGHz.persistentDiversityCount;
+    result.diversityVelocity        = result.subGHz.diversityVelocity;
+    result.sustainedCycles          = result.subGHz.sustainedCycles;
 
     return result;
 }
