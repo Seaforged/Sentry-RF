@@ -128,6 +128,9 @@ static void loRaScanTask(void* param) {
                                  cadFsk.persistentDiversityCount,
                                  cadFsk.diversityVelocity,
                                  cadFsk.sustainedCycles);
+        // Phase C: also feed the full sub-GHz CadBandSummary (anchor + counts)
+        // into the shadow candidate engine. Runs parallel to the legacy path.
+        detectionEngineIngestCadBandSummary(cadFsk.subGHz);
 
         unsigned long cadDone = millis();
 

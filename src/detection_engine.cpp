@@ -115,6 +115,197 @@ static bool freshRssiThisCycle = false;
 static int lastFastScore = 0;
 static int lastConfirmScore = 0;
 
+// ── Phase C: Shadow-mode candidate engine ────────────────────────────────────
+// Runs IN PARALLEL with the legacy assessThreat() scorer. Logs candidate-based
+// decisions via [CAND] serial lines for comparison but does NOT drive the
+// actual threat output — that still comes from assessThreat().
+
+static DetectionCandidate candidatePool[MAX_CANDIDATES] = {};
+
+// Cached sub-GHz CadBandSummary — populated by detectionEngineIngestCadBandSummary()
+// each cycle from main.cpp, consumed by the shadow-mode block in detectionEngineAssess().
+static CadBandSummary lastSubGHzSummary = {};
+static bool lastSubGHzSummaryValid = false;
+
+static void resetCandidate(DetectionCandidate& c) {
+    memset(&c, 0, sizeof(c));
+    c.state = CAND_EMPTY;
+    c.active = false;
+    c.protoHint = nullptr;  // critical — never keep a stale protocol pointer
+}
+
+static bool evidenceLive(const EvidenceTerm& e, uint32_t nowMs) {
+    return e.ready && e.score > 0 && (nowMs - e.lastSeenMs) <= e.ttlMs;
+}
+
+static uint8_t evidenceScore(const EvidenceTerm& e, uint32_t nowMs) {
+    return evidenceLive(e, nowMs) ? e.score : (uint8_t)0;
+}
+
+static void refreshEvidence(EvidenceTerm& e, uint8_t score, uint32_t ttlMs,
+                            uint32_t nowMs, bool ready = true) {
+    e.score = score;
+    e.lastSeenMs = nowMs;
+    e.ttlMs = ttlMs;
+    e.ready = ready;
+}
+
+static bool allEvidenceDead(const DetectionCandidate& c, uint32_t nowMs) {
+    return !evidenceLive(c.cadConfirmed, nowMs) &&
+           !evidenceLive(c.cadPending, nowMs) &&
+           !evidenceLive(c.fskConfirmed, nowMs) &&
+           !evidenceLive(c.fhssSub, nowMs) &&
+           !evidenceLive(c.sweepSub, nowMs) &&
+           !evidenceLive(c.protoSub, nowMs) &&
+           !evidenceLive(c.cad24, nowMs) &&
+           !evidenceLive(c.proto24, nowMs) &&
+           !evidenceLive(c.rid, nowMs) &&
+           !evidenceLive(c.gnss, nowMs);
+}
+
+static void ageOutCandidates(DetectionCandidate* pool, uint8_t count, uint32_t nowMs) {
+    for (uint8_t i = 0; i < count; i++) {
+        DetectionCandidate& c = pool[i];
+        if (!c.active) continue;
+        if (allEvidenceDead(c, nowMs) && (nowMs - c.lastSeenMs) > CAND_AGE_OUT_MS) {
+            resetCandidate(c);
+        }
+    }
+}
+
+static DetectionCandidate* findCandidateForBandFreq(DetectionCandidate* pool, uint8_t count,
+                                                    float freq, uint8_t bandMask,
+                                                    uint32_t nowMs) {
+    for (uint8_t i = 0; i < count; i++) {
+        DetectionCandidate& c = pool[i];
+        if (!c.active) continue;
+        if ((c.bandMask & bandMask) == 0) continue;
+        if ((nowMs - c.lastSeenMs) > CAND_ASSOC_SUB_TTL_MS) continue;
+
+        // (a) direct anchor match
+        if (fabsf(freq - c.anchorFreq) <= CAND_ASSOC_SUB_MHZ) {
+            return &c;
+        }
+        // (b) falls within the expanded seen-frequency envelope
+        if (freq >= (c.minFreqSeen - 1.0f) && freq <= (c.maxFreqSeen + 1.0f)) {
+            return &c;
+        }
+        // (c) candidate has live FHSS evidence → accept by regional band alone
+        if (evidenceLive(c.fhssSub, nowMs)) {
+            bool regionMatch = (freq >= 902.0f && freq <= 928.0f) ||  // US sub-GHz
+                               (freq >= 860.0f && freq <= 870.0f);    // EU sub-GHz
+            if (regionMatch) return &c;
+        }
+    }
+    return nullptr;
+}
+
+static DetectionCandidate* allocCandidate(DetectionCandidate* pool, uint8_t count) {
+    // Prefer an empty slot
+    for (uint8_t i = 0; i < count; i++) {
+        if (pool[i].state == CAND_EMPTY) return &pool[i];
+    }
+    // Otherwise evict the oldest non-CONFIRMED inactive-or-active candidate
+    int oldestIdx = -1;
+    uint32_t oldestLastSeen = UINT32_MAX;
+    for (uint8_t i = 0; i < count; i++) {
+        if (pool[i].state == CAND_CONFIRMED) continue;
+        if (pool[i].lastSeenMs < oldestLastSeen) {
+            oldestLastSeen = pool[i].lastSeenMs;
+            oldestIdx = i;
+        }
+    }
+    if (oldestIdx >= 0) {
+        resetCandidate(pool[oldestIdx]);
+        return &pool[oldestIdx];
+    }
+    // All slots are CAND_CONFIRMED — refuse to evict
+    return nullptr;
+}
+
+static uint8_t computeFastScore(const DetectionCandidate& c, uint32_t nowMs) {
+    uint16_t cadRaw = (uint16_t)evidenceScore(c.cadConfirmed, nowMs) +
+                      (uint16_t)evidenceScore(c.cadPending, nowMs);
+    if (cadRaw > FAST_SCORE_CAD_CAP) cadRaw = FAST_SCORE_CAD_CAP;
+
+    uint16_t fskRaw = (uint16_t)evidenceScore(c.fskConfirmed, nowMs);
+    if (fskRaw > FAST_SCORE_FSK_CAP) fskRaw = FAST_SCORE_FSK_CAP;
+
+    uint16_t divBonus = evidenceLive(c.fhssSub, nowMs) ? FAST_SCORE_DIVERSITY_BONUS : 0;
+
+    uint16_t total = cadRaw + fskRaw + divBonus;
+    return (total > 255) ? (uint8_t)255 : (uint8_t)total;
+}
+
+static uint8_t computeConfirmScore(const DetectionCandidate& c, uint32_t nowMs) {
+    uint16_t total = (uint16_t)evidenceScore(c.sweepSub, nowMs) +
+                     (uint16_t)evidenceScore(c.protoSub, nowMs) +
+                     (uint16_t)evidenceScore(c.cad24, nowMs) +
+                     (uint16_t)evidenceScore(c.proto24, nowMs) +
+                     (uint16_t)evidenceScore(c.rid, nowMs) +
+                     (uint16_t)evidenceScore(c.gnss, nowMs);
+    return (total > 255) ? (uint8_t)255 : (uint8_t)total;
+}
+
+static ThreatDecision chooseBestCandidate(DetectionCandidate* pool, uint8_t count,
+                                          uint32_t nowMs) {
+    ageOutCandidates(pool, count, nowMs);
+
+    ThreatDecision best = { THREAT_CLEAR, 0, 0, 0.0f, 0, false };
+
+    for (uint8_t i = 0; i < count; i++) {
+        DetectionCandidate& c = pool[i];
+        if (!c.active) continue;
+
+        uint8_t fast = computeFastScore(c, nowMs);
+        uint8_t confirm = computeConfirmScore(c, nowMs);
+
+        ThreatLevel level = THREAT_CLEAR;
+        if (fast >= POLICY_CRITICAL_FAST && confirm >= POLICY_CRITICAL_CONFIRM) {
+            level = THREAT_CRITICAL;
+        } else if (fast >= POLICY_WARNING_FAST && confirm >= POLICY_WARNING_CONFIRM) {
+            level = THREAT_WARNING;
+        } else if (fast >= POLICY_ADVISORY_FAST) {
+            level = THREAT_ADVISORY;
+        } else if (evidenceLive(c.rid, nowMs) && c.rid.score >= POLICY_RID_ONLY_ADVISORY) {
+            // RID-only path: no fast evidence required
+            level = THREAT_ADVISORY;
+        }
+
+        // Promote to CAND_CONFIRMED on first WARNING+ crossing
+        if (level >= THREAT_WARNING && c.state != CAND_CONFIRMED) {
+            c.state = CAND_CONFIRMED;
+        }
+
+        // Pick highest level; break ties by highest fast+confirm
+        bool better = false;
+        if (level > best.level) {
+            better = true;
+        } else if (level == best.level && (uint16_t)(fast + confirm) >
+                                          (uint16_t)(best.fastScore + best.confirmScore)) {
+            better = true;
+        }
+        if (better) {
+            best.level = level;
+            best.fastScore = fast;
+            best.confirmScore = confirm;
+            best.anchorFreq = c.anchorFreq;
+            best.bandMask = c.bandMask;
+            best.hasCandidate = true;
+        }
+    }
+
+    return best;
+}
+
+// Public: main.cpp caches the full sub-GHz CadBandSummary here once per cycle
+// so the Phase C shadow engine can read the anchor + full counts. The existing
+// detectionEngineIngestCad() primitive-int path is unchanged.
+void detectionEngineIngestCadBandSummary(const CadBandSummary& subGHz) {
+    lastSubGHzSummary = subGHz;
+    lastSubGHzSummaryValid = true;
+}
+
 // ── Noise floor calculation ─────────────────────────────────────────────────
 
 static float computeNoiseFloor(const float* rssi, int count) {
@@ -790,9 +981,148 @@ void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan
     }
 }
 
+// ── Phase C: Shadow-mode evaluation ─────────────────────────────────────────
+// Runs AFTER assessThreat() on every assess cycle. Reads the cached sub-GHz
+// CadBandSummary, refreshes evidence on the matching candidate, attaches
+// cross-domain (RID/GNSS) and sweep (peak/proto) evidence, and logs the
+// candidate-engine decision for comparison with the legacy scorer. Does NOT
+// influence the returned ThreatLevel this phase — comparison-only.
+static void evaluateShadowCandidateEngine(ThreatLevel legacyLevel,
+                                          const IntegrityStatus& integrity,
+                                          uint32_t nowMs) {
+    // ── 1. Seed / refresh a sub-GHz candidate from the cached band summary ──
+    if (lastSubGHzSummaryValid) {
+        const CadBandSummary& s = lastSubGHzSummary;
+
+        bool haveCad  = (s.confirmedCadCount > 0) || (s.strongPendingCad > 0);
+        bool haveFsk  = (s.confirmedFskCount > 0);
+        bool haveFhss = (s.persistentDiversityCount > 0) ||
+                        (s.diversityVelocity >= DIVERSITY_VELOCITY_FHSS_MIN);
+
+        if (haveCad || haveFsk || haveFhss) {
+            // Anchor: prefer the Phase B CadEvidenceAnchor, fall back to mid-band.
+            float anchorFreq = s.anchor.valid ? s.anchor.frequency : 915.0f;
+
+            DetectionCandidate* c = findCandidateForBandFreq(
+                candidatePool, MAX_CANDIDATES, anchorFreq, 0x01 /* sub-GHz */, nowMs);
+
+            if (!c) {
+                c = allocCandidate(candidatePool, MAX_CANDIDATES);
+                if (c) {
+                    resetCandidate(*c);
+                    c->active      = true;
+                    c->state       = CAND_SEEDING;
+                    c->bandMask    = 0x01;
+                    c->anchorFreq  = anchorFreq;
+                    c->minFreqSeen = anchorFreq;
+                    c->maxFreqSeen = anchorFreq;
+                    c->firstSeenMs = nowMs;
+                }
+            } else {
+                // Expand envelope; gently pull anchor toward latest hit.
+                if (anchorFreq < c->minFreqSeen) c->minFreqSeen = anchorFreq;
+                if (anchorFreq > c->maxFreqSeen) c->maxFreqSeen = anchorFreq;
+                c->anchorFreq = (c->anchorFreq * 0.7f) + (anchorFreq * 0.3f);
+            }
+
+            if (c) {
+                c->lastSeenMs = nowMs;
+
+                // CAD confirmed/pending scale per-tap matching legacy fast score.
+                if (haveCad) {
+                    uint16_t cadPts = (uint16_t)s.confirmedCadCount * FAST_SCORE_CAD_PER_TAP;
+                    if (cadPts > FAST_SCORE_CAD_CAP) cadPts = FAST_SCORE_CAD_CAP;
+                    refreshEvidence(c->cadConfirmed, (uint8_t)cadPts,
+                                    TTL_CAD_CONFIRMED_MS, nowMs);
+
+                    // Pending taps contribute half of a confirmed tap's weight.
+                    uint16_t pendPts = (uint16_t)s.strongPendingCad * (FAST_SCORE_CAD_PER_TAP / 2);
+                    if (pendPts > FAST_SCORE_CAD_CAP) pendPts = FAST_SCORE_CAD_CAP;
+                    refreshEvidence(c->cadPending, (uint8_t)pendPts,
+                                    TTL_CAD_PENDING_MS, nowMs);
+
+                    if (s.confirmedCadCount > 0 && c->state == CAND_SEEDING) {
+                        c->state = CAND_TRACKING;
+                    }
+                }
+
+                if (haveFsk) {
+                    uint16_t fskPts = (uint16_t)s.confirmedFskCount * FAST_SCORE_FSK_PER_TAP;
+                    if (fskPts > FAST_SCORE_FSK_CAP) fskPts = FAST_SCORE_FSK_CAP;
+                    refreshEvidence(c->fskConfirmed, (uint8_t)fskPts,
+                                    TTL_FSK_CONFIRMED_MS, nowMs);
+                    if (c->state == CAND_SEEDING) c->state = CAND_TRACKING;
+                }
+
+                if (haveFhss) {
+                    refreshEvidence(c->fhssSub, 1, TTL_FHSS_SUB_MS, nowMs);
+                }
+
+                // Fresh-sweep confirm evidence: only attach on cycles where
+                // detectionEngineIngestSweep() updated tracked[]/protoTracked[].
+                if (freshRssiThisCycle) {
+                    int peakSub  = countPersistentDroneUS() + countPersistentDrone();
+                    int protoSub = countPersistentProtocolUS() + countPersistentProtocol(false);
+                    if (peakSub > 0) {
+                        refreshEvidence(c->sweepSub, WEIGHT_CONFIRM_PEAK,
+                                        TTL_SWEEP_SUB_MS, nowMs);
+                    }
+                    if (protoSub > 0) {
+                        refreshEvidence(c->protoSub, WEIGHT_CONFIRM_PROTO,
+                                        TTL_PROTO_SUB_MS, nowMs);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 2. Attach cross-domain evidence (RID, GNSS) to ALL active candidates ──
+    bool ridDetected = false;
+    unsigned long ridLastMs = 0;
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(5))) {
+        ridDetected = systemState.remoteIdDetected;
+        ridLastMs   = systemState.remoteIdLastMs;
+        xSemaphoreGive(stateMutex);
+    }
+    bool ridFresh    = ridDetected && ((nowMs - ridLastMs) < 10000);
+    bool gnssAnomaly = integrity.jammingDetected || integrity.spoofingDetected ||
+                       integrity.cnoAnomalyDetected;
+
+    for (uint8_t i = 0; i < MAX_CANDIDATES; i++) {
+        DetectionCandidate& cc = candidatePool[i];
+        if (!cc.active) continue;
+        if (ridFresh) {
+            refreshEvidence(cc.rid, WEIGHT_CONFIRM_REMOTE_ID, TTL_RID_MS, nowMs);
+        }
+        if (gnssAnomaly) {
+            refreshEvidence(cc.gnss, WEIGHT_CONFIRM_GNSS_TEMPORAL, TTL_GNSS_MS, nowMs);
+        }
+    }
+
+    // ── 3. Run scoring policy, log for comparison ─────────────────────────────
+    ThreatDecision decision = chooseBestCandidate(candidatePool, MAX_CANDIDATES, nowMs);
+
+    Serial.printf("[CAND] fast=%u conf=%u level=%s anchor=%.1fMHz band=0x%02X has=%d\n",
+                  decision.fastScore, decision.confirmScore,
+                  threatName(decision.level),
+                  decision.anchorFreq, decision.bandMask,
+                  decision.hasCandidate ? 1 : 0);
+
+    if (decision.level != legacyLevel) {
+        Serial.printf("[CAND-DELTA] legacy=%s candidate=%s\n",
+                      threatName(legacyLevel), threatName(decision.level));
+    }
+}
+
 ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& integrity) {
     (void)gps;  // reserved for future geo-gated scoring
     ThreatLevel result = assessThreat(integrity);
+
+    // Phase C: shadow-mode candidate engine runs in parallel. Its decision is
+    // logged via [CAND]/[CAND-DELTA] only — it does NOT drive the returned
+    // ThreatLevel this phase.
+    evaluateShadowCandidateEngine(result, integrity, (uint32_t)millis());
+
     // Reset freshRssiThisCycle so the NEXT non-sweep cycle's confirm score
     // doesn't re-use RSSI-derived evidence from the previous sweep.
     freshRssiThisCycle = false;

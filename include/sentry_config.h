@@ -159,4 +159,45 @@ static const uint8_t WEIGHT_FAST_DETECT        = 20; // bonus points when both t
 static const unsigned long MUTE_DURATION_MS  = 300000; // 5 minutes
 static const unsigned long REMINDER_INTERVAL = 30000;  // 30 seconds
 
+// ── Phase A.4 / Phase C: Candidate Engine (Detection Engine v2.0) ────
+// Spec: docs/SENTRY-RF_Detection_Engine_v2_SPEC.md Part 4
+
+// --- Candidate engine sizing ---
+#define MAX_CANDIDATES              6
+#define CAND_AGE_OUT_MS             12000   // Evict if all evidence dead > 12s
+
+// --- Association windows ---
+#define CAND_ASSOC_SUB_MHZ          1.0f    // Sub-GHz evidence must be within ±1 MHz of anchor
+#define CAND_ASSOC_24_MHZ           4.0f    // 2.4 GHz evidence association window ±4 MHz
+#define CAND_ASSOC_SUB_TTL_MS       6000    // Sub-GHz evidence attaches only if candidate seen within 6s
+#define CAND_ASSOC_24_TTL_MS        5000    // 2.4 GHz evidence attaches only if candidate seen within 5s
+
+// --- Evidence TTLs (milliseconds) ---
+#define TTL_CAD_CONFIRMED_MS        2500
+#define TTL_CAD_PENDING_MS          2500
+#define TTL_FSK_CONFIRMED_MS        2500
+#define TTL_FHSS_SUB_MS             3000
+#define TTL_SWEEP_SUB_MS            4500
+#define TTL_PROTO_SUB_MS            6000
+#define TTL_CAD24_MS                5000
+#define TTL_PROTO24_MS              5000
+#define TTL_RID_MS                  10000
+#define TTL_GNSS_MS                 8000
+
+// --- Scoring policy thresholds ---
+#define POLICY_ADVISORY_FAST        15
+#define POLICY_WARNING_FAST         40
+#define POLICY_WARNING_CONFIRM      5
+#define POLICY_CRITICAL_FAST        40
+#define POLICY_CRITICAL_CONFIRM     30
+#define POLICY_RID_ONLY_ADVISORY    30      // RID confirm score for ADVISORY without RF candidate
+
+// --- Fast score component caps ---
+#define FAST_SCORE_CAD_PER_TAP      10
+#define FAST_SCORE_CAD_CAP          40
+#define FAST_SCORE_FSK_PER_TAP      15
+#define FAST_SCORE_FSK_CAP          30
+#define FAST_SCORE_DIVERSITY_BONUS  20
+#define FAST_SCORE_FHSS_BONUS       15
+
 #endif // SENTRY_CONFIG_H

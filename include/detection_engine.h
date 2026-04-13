@@ -5,6 +5,7 @@
 #include "rf_scanner.h"
 #include "gps_manager.h"
 #include "gnss_integrity.h"
+#include "drone_signatures.h"   // for DroneProtocol (Phase C candidate struct)
 
 void detectionEngineInit();
 
@@ -19,6 +20,11 @@ void detectionEngineIngestCad(int cadCount, int fskCount, int strongPendingCad,
                               int activeTaps, int diversityCount,
                               int persistentDiversity, int diversityVelocity,
                               int sustainedCycles);
+
+// Phase C: Ingest full sub-GHz CadBandSummary (anchor + counts + timestamps)
+// into the shadow candidate engine. Called from loRaScanTask alongside the
+// legacy detectionEngineIngestCad() path. Safe no-op if summary is empty.
+void detectionEngineIngestCadBandSummary(const struct CadBandSummary& subGHz);
 
 // Ingest fresh sweep data — called only on RSSI sweep cycles.
 // Runs ambientFilterUpdate, updateBandEnergy, peak extraction, protocol tracking,
@@ -53,5 +59,55 @@ int detectionEngineGetConfirmScore();
 
 // Timestamp of the most recent detection event that scored ADVISORY or higher.
 uint32_t getLastDetectionMs();
+
+// ── Phase C: Shadow-mode candidate engine data structures ─────────────────
+// These run IN PARALLEL with the legacy scorer this phase. Actual threat
+// output is still driven by assessThreat(); the candidate engine's result
+// is logged via [CAND] and [CAND-DELTA] serial lines for comparison only.
+
+enum CandidateState : uint8_t {
+    CAND_EMPTY,
+    CAND_SEEDING,
+    CAND_TRACKING,
+    CAND_CONFIRMED
+};
+
+struct EvidenceTerm {
+    uint8_t  score;
+    uint32_t lastSeenMs;
+    uint32_t ttlMs;
+    bool     ready;
+};
+
+struct DetectionCandidate {
+    CandidateState       state;
+    bool                 active;
+    uint8_t              bandMask;        // bit0 = sub-GHz, bit1 = 2.4 GHz
+    float                anchorFreq;
+    float                minFreqSeen;
+    float                maxFreqSeen;
+    const DroneProtocol* protoHint;       // ALWAYS nullptr on reset, NEVER store stale pointer
+    uint32_t             firstSeenMs;
+    uint32_t             lastSeenMs;
+    EvidenceTerm         cadConfirmed;
+    EvidenceTerm         cadPending;
+    EvidenceTerm         fskConfirmed;
+    EvidenceTerm         fhssSub;
+    EvidenceTerm         sweepSub;
+    EvidenceTerm         protoSub;
+    EvidenceTerm         cad24;
+    EvidenceTerm         proto24;
+    EvidenceTerm         rid;
+    EvidenceTerm         gnss;
+};
+
+struct ThreatDecision {
+    ThreatLevel level;
+    uint8_t     fastScore;
+    uint8_t     confirmScore;
+    float       anchorFreq;
+    uint8_t     bandMask;
+    bool        hasCandidate;
+};
 
 #endif // DETECTION_ENGINE_H
