@@ -122,12 +122,12 @@ static void loRaScanTask(void* param) {
         // Pass last RSSI data for RSSI-guided CAD scanning.
         CadFskResult cadFsk = cadFskScan(radio, sweepNum,
                                           localResult.sweepTimeMs > 0 ? &localResult : nullptr);
-        detectionEngineSetCadFsk(cadFsk.confirmedCadCount, cadFsk.confirmedFskCount,
-                                cadFsk.strongPendingCad, cadFsk.totalActiveTaps,
-                                cadFsk.diversityCount,
-                                cadFsk.persistentDiversityCount,
-                                cadFsk.diversityVelocity,
-                                cadFsk.sustainedCycles);
+        detectionEngineIngestCad(cadFsk.confirmedCadCount, cadFsk.confirmedFskCount,
+                                 cadFsk.strongPendingCad, cadFsk.totalActiveTaps,
+                                 cadFsk.diversityCount,
+                                 cadFsk.persistentDiversityCount,
+                                 cadFsk.diversityVelocity,
+                                 cadFsk.sustainedCycles);
 
         unsigned long cadDone = millis();
 
@@ -138,12 +138,8 @@ static void loRaScanTask(void* param) {
             xSemaphoreGive(stateMutex);
         }
 
-        // Evaluate threat with CAD results + last RSSI data (not fresh)
-#ifdef BOARD_T3S3_LR1121
-        ThreatLevel threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity, &local24, false);
-#else
-        ThreatLevel threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity, nullptr, false);
-#endif
+        // Evaluate threat with current cached state (no fresh sweep this cycle)
+        ThreatLevel threat = detectionEngineAssess(snapGps, snapIntegrity);
 
         // Store threat + CAD results into shared state
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -176,12 +172,13 @@ static void loRaScanTask(void* param) {
                 xSemaphoreGive(stateMutex);
             }
 
-            // Re-assess with fresh RSSI data
+            // Ingest fresh sweep + re-assess with new RSSI data
 #ifdef BOARD_T3S3_LR1121
-            threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity, &local24, true);
+            detectionEngineIngestSweep(localResult, &local24);
 #else
-            threat = detectionEngineUpdate(localResult, snapGps, snapIntegrity, nullptr, true);
+            detectionEngineIngestSweep(localResult, nullptr);
 #endif
+            threat = detectionEngineAssess(snapGps, snapIntegrity);
             if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 systemState.threatLevel = threat;
                 xSemaphoreGive(stateMutex);
