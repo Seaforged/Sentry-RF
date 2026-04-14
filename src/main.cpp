@@ -124,15 +124,9 @@ static void loRaScanTask(void* param) {
         // Pass last RSSI data for RSSI-guided CAD scanning.
         CadFskResult cadFsk = cadFskScan(radio, sweepNum,
                                           localResult.valid ? &localResult : nullptr);
-        detectionEngineIngestCad(cadFsk.confirmedCadCount, cadFsk.confirmedFskCount,
-                                 cadFsk.strongPendingCad, cadFsk.totalActiveTaps,
-                                 cadFsk.diversityCount,
-                                 cadFsk.persistentDiversityCount,
-                                 cadFsk.diversityVelocity,
-                                 cadFsk.sustainedCycles);
-        // Feed the full sub-GHz CadBandSummary into the real candidate engine.
-        // The aggregate-int path above is retained only for the legacy
-        // comparison scorer that drives [CAND-DELTA].
+        // Feed the full sub-GHz CadBandSummary into the candidate engine.
+        // Phase G: the aggregate-int detectionEngineIngestCad() shim is gone;
+        // the candidate engine reads the band summary directly.
         detectionEngineIngestCadBandSummary(cadFsk.subGHz);
 #ifdef BOARD_T3S3_LR1121
         // 2.4 GHz CadBandSummary is confirmer-only on LR1121.
@@ -153,11 +147,17 @@ static void loRaScanTask(void* param) {
 
         // Store threat + CAD results into shared state
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            systemState.threatLevel = threat;
-            systemState.cadDiversity = cadFsk.diversityCount;
-            systemState.cadConfirmed = cadFsk.confirmedCadCount;
-            systemState.cadTotalTaps = cadFsk.totalActiveTaps;
+            systemState.threatLevel    = threat;
+            systemState.cadDiversity   = cadFsk.diversityCount;
+            systemState.cadConfirmed   = cadFsk.confirmedCadCount;
+            systemState.cadTotalTaps   = cadFsk.totalActiveTaps;
             systemState.confidenceScore = detectionEngineGetScore();
+            systemState.fastScore      = detectionEngineGetFastScore();
+            systemState.confirmScore   = detectionEngineGetConfirmScore();
+            systemState.anchorFreq     = detectionEngineGetAnchorFreq();
+            systemState.bandMask       = detectionEngineGetBandMask();
+            systemState.hasCandidate   = detectionEngineHasCandidate();
+            systemState.candidateCount = detectionEngineGetCandidateCount();
             xSemaphoreGive(stateMutex);
         }
 
@@ -195,7 +195,13 @@ static void loRaScanTask(void* param) {
 #endif
             threat = detectionEngineAssess(snapGps, snapIntegrity);
             if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                systemState.threatLevel = threat;
+                systemState.threatLevel    = threat;
+                systemState.fastScore      = detectionEngineGetFastScore();
+                systemState.confirmScore   = detectionEngineGetConfirmScore();
+                systemState.anchorFreq     = detectionEngineGetAnchorFreq();
+                systemState.bandMask       = detectionEngineGetBandMask();
+                systemState.hasCandidate   = detectionEngineHasCandidate();
+                systemState.candidateCount = detectionEngineGetCandidateCount();
                 xSemaphoreGive(stateMutex);
             }
 

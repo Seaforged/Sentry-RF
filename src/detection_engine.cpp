@@ -37,17 +37,6 @@ struct ProtoTracker {
 
 static ProtoTracker protoTracked[MAX_PROTO_TRACKED];
 
-// ── CAD/FSK detection counts (per sweep cycle) ───────────────────────────
-
-static int cadDetectionsThisCycle = 0;
-static int fskDetectionsThisCycle = 0;
-static int strongPendingCadThisCycle = 0;
-static int totalActiveTapsThisCycle = 0;
-static int diversityCountThisCycle = 0;
-static int persistentDiversityThisCycle = 0;
-static int diversityVelocityThisCycle = 0;
-static int sustainedDiversityCyclesThisCycle = 0;
-
 // ── Band energy trending (902-928 MHz) ──────────────────────────────────
 // Tracks average RSSI across US band to detect aggregate FHSS energy rise.
 // FHSS drones spread energy across 80 channels — individual peaks come and
@@ -105,19 +94,11 @@ static void updateBandEnergy(const float* rssi) {
 // ── Threat state machine ────────────────────────────────────────────────────
 
 static ThreatLevel currentThreat = THREAT_CLEAR;
-// Phase D: assessThreat() runs in parallel for [CAND-DELTA] regression-alarm
-// comparison only. Its desired/escalation/cooldown logic is preserved but it
-// MUST NOT mutate the global currentThreat — that's owned by the candidate
-// engine path now. legacyThreat is the legacy scorer's private "current"
-// value used solely for its internal cooldown/escalation math.
-static ThreatLevel legacyThreat = THREAT_CLEAR;
 
-// Phase D Stabilization: separate cooldown timer for candidate FSM hysteresis.
-// lastThreatEventMs is owned exclusively by legacy assessThreat(); the
-// candidate FSM uses this independent timer so the two scorers' timing
-// resets cannot interfere.
+// Candidate FSM cooldown timer. Independent of any legacy state (which is
+// gone as of Phase G) so transitions are driven strictly by the candidate
+// engine path.
 static uint32_t candidateThreatEventMs = 0;
-static unsigned long lastThreatEventMs = 0;
 static uint32_t lastDetectionMs = 0;
 
 // Last wall time (millis) a candidate crossed the ADVISORY fast-score
@@ -126,14 +107,15 @@ static uint32_t lastDetectionMs = 0;
 // active recently. 0 means "never", treated as not-active regardless of age.
 static uint32_t lastRfDetectionMs = 0;
 // COOLDOWN_MS from sentry_config.h
-static unsigned long cleanSinceMs = 0;  // wall-clock time when allClean became true
 static unsigned long clearSinceMs = 0;
 
-// Captured at the top of detectionEngineUpdate() so assessThreat() can gate
-// RSSI-derived confirm score components on whether the sweep is fresh.
-static bool freshRssiThisCycle = false;
 static int lastFastScore = 0;
 static int lastConfirmScore = 0;
+// Phase G: cached last ThreatDecision fields for main.cpp/display.
+static float   lastAnchorFreq     = 0.0f;
+static uint8_t lastBandMask       = 0;
+static bool    lastHasCandidate   = false;
+static int     lastCandidateCount = 0;
 
 // ── Candidate engine state (introduced Phase C, cutover Phase D) ─────────────
 // As of Phase D the candidate engine drives currentThreat and the FSM. The
@@ -470,9 +452,8 @@ static ThreatDecision chooseBestCandidate(DetectionCandidate* pool, uint8_t coun
 }
 
 // Public: main.cpp caches the full sub-GHz CadBandSummary here once per cycle
-// so the candidate engine can read the anchor + full counts. The existing
-// detectionEngineIngestCad() aggregate-int path remains only for the legacy
-// comparison scorer behind [CAND-DELTA].
+// so the candidate engine can read the anchor + full counts. Phase G: this
+// is now the sole CAD ingest path — the legacy aggregate-int shim is gone.
 void detectionEngineIngestCadBandSummary(const CadBandSummary& subGHz) {
     lastSubGHzSummary = subGHz;
     lastSubGHzSummaryValid = true;
@@ -873,179 +854,13 @@ static void emitCandidateThreatEvent(ThreatLevel level, float anchorFreq) {
     xQueueSend(detectionQueue, &event, 0);
 }
 
-// Phase D+: assessThreat() runs in parallel with the candidate engine for
-// [CAND-DELTA] regression-alarm comparison only. Its return value is logged
-// against the candidate decision but does NOT drive currentThreat or fire
-// emitThreatTransition — both moved to detectionEngineAssess() and are
-// driven exclusively by the candidate engine.
-static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
-    ThreatLevel prevThreat = legacyThreat;
-    // ── Two-layer scoring (legacy reference — comparison only) ───────
-    // FAST score: CAD-only evidence. Updates every cycle.
-    //
-    // CAD/FSK weights scale per-tap (10/tap CAD, 15/tap FSK) so a single
-    // infrastructure tap contributes 10 points (ADVISORY only) while 4+
-    // confirmed drone taps reach the 40-point WARNING floor.
-    int fastScore = 0;
-    int cadFastPts = cadDetectionsThisCycle * 10;
-    if (cadFastPts > 40) cadFastPts = 40;
-    int fskFastPts = fskDetectionsThisCycle * 15;
-    if (fskFastPts > 30) fskFastPts = 30;
-    fastScore += cadFastPts;
-    fastScore += fskFastPts;
-    if (persistentDiversityThisCycle > 0)    fastScore += WEIGHT_FAST_PERSISTENT_DIV;
-    if (diversityVelocityThisCycle >= DIVERSITY_VELOCITY_FHSS_MIN)
-                                             fastScore += WEIGHT_FAST_FHSS_VELOCITY;
-
-    // CONFIRM score: RSSI + protocol + RID + GNSS. Independent corroboration
-    // gates promotion to WARNING/CRITICAL. RSSI-derived components only fire
-    // on fresh sweeps — avoids stale-data contributions on non-sweep cycles.
-    int confirmScore = 0;
-    if (freshRssiThisCycle) {
-        int freqUS = countPersistentDroneUS();
-        int protoUS = countPersistentProtocolUS();
-        int freqSubGHz = countPersistentDrone();
-        int protoSubGHz = countPersistentProtocol(false);
-        int proto24GHz = countPersistentProtocol(true);
-        int freq24GHz = countPersistentDrone24();
-        bool anyPeak = (freqUS + freqSubGHz + freq24GHz) > 0;
-        bool anyProto = (protoUS + protoSubGHz + proto24GHz) > 0;
-        if (anyPeak)  confirmScore += WEIGHT_CONFIRM_PEAK;
-        if (anyProto) confirmScore += WEIGHT_CONFIRM_PROTO;
-        if (bandEnergyElevated) confirmScore += WEIGHT_CONFIRM_BAND_ENERGY;
-    }
-
-    // WiFi Remote ID — independent evidence, not RSSI-gated
-    bool ridDetected = false;
-    unsigned long ridLastMs = 0;
-    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(5))) {
-        ridDetected = systemState.remoteIdDetected;
-        ridLastMs = systemState.remoteIdLastMs;
-        xSemaphoreGive(stateMutex);
-    }
-    if (ridDetected && (millis() - ridLastMs) < 10000) {
-        confirmScore += WEIGHT_CONFIRM_REMOTE_ID;
-    }
-
-    // GNSS anomaly — cross-domain independent evidence
-    bool gnssAnomaly = integrity.jammingDetected || integrity.spoofingDetected ||
-                       integrity.cnoAnomalyDetected;
-    if (gnssAnomaly) confirmScore += WEIGHT_CONFIRM_GNSS_TEMPORAL;
-
-    lastFastScore = fastScore;
-    lastConfirmScore = confirmScore;
-    lastScore = fastScore + confirmScore;  // legacy display field
-
-    // ── Policy: fast produces ADVISORY, confirm promotes to WARNING/CRITICAL
-    ThreatLevel desired = THREAT_CLEAR;
-    if (fastScore >= FAST_WARNING_THRESH && confirmScore >= CONFIRM_CRITICAL_THRESH) {
-        desired = THREAT_CRITICAL;
-    } else if (fastScore >= FAST_WARNING_THRESH && confirmScore >= CONFIRM_WARNING_THRESH) {
-        desired = THREAT_WARNING;
-    } else if (fastScore >= FAST_ADVISORY_THRESH) {
-        desired = THREAT_ADVISORY;
-    } else if (confirmScore >= CONFIRM_ADVISORY_THRESH) {
-        // RID-only path: Remote ID detection alone is enough for ADVISORY
-        desired = THREAT_ADVISORY;
-    }
-
-    // Phase D: lastDetectionMs is now set by detectionEngineAssess from the
-    // candidate decision (not legacy desired).
-
-    // Phase E note: this warmup gate is part of the legacy assessThreat()
-    // comparison path only — it does NOT affect the candidate engine.
-    // Per Phase E spec, per-evidence readiness gates on the candidate path
-    // replace the global warmup cap. The legacy path is exempt from this
-    // requirement as it is comparison-only and will be removed in Phase G.
-    //
-    // Post-warmup housekeeping: ONE-TIME timer/state reset when warmup ends.
-    // Phase D Stabilization: the previous version also wiped tracked[],
-    // tracked24[], protoTracked[], and band-energy history — but those arrays
-    // are exactly the corroboration evidence that the candidate engine reads
-    // via countPersistentDroneUS()/countPersistentProtocol() for sweepSub/
-    // protoSub confirmation. Wiping them at the warmup boundary lost the
-    // sweep confirmation context for any real signal acquired during warmup.
-    // The clears have been removed; only timer/state resets remain.
-    static bool postWarmupReset = false;
-    bool warmupActive = !ambientFilterReady() || !cadWarmupComplete();
-    if (warmupActive) {
-        postWarmupReset = false;
-    } else if (!postWarmupReset) {
-        postWarmupReset = true;
-        cleanSinceMs = 0;
-        clearSinceMs = 0;
-        legacyThreat = THREAT_CLEAR;
-        desired = THREAT_CLEAR;
-        lastThreatEventMs = millis();
-    }
-
-    unsigned long now = millis();
-
-    // Escalation: jump directly to the level evidence supports (fast up).
-    // This replaces the old one-step-per-cycle limiter which delayed
-    // legitimate detections by N cycles during escalation.
-    if (desired > legacyThreat) {
-        legacyThreat = desired;
-        lastThreatEventMs = now;
-    } else if (desired == legacyThreat && legacyThreat > THREAT_CLEAR) {
-        // Steady state at evidence-supported level — reset cooldown timer
-        // so we don't decay while evidence is still present.
-        lastThreatEventMs = now;
-    }
-
-    // Cooldown: decay one step every COOLDOWN_MS when evidence weakens
-    if (desired < legacyThreat && legacyThreat > THREAT_CLEAR) {
-        if (now - lastThreatEventMs > COOLDOWN_MS) {
-            desired = (ThreatLevel)(legacyThreat - 1);
-            lastThreatEventMs = now;
-        } else {
-            desired = legacyThreat;
-        }
-    }
-
-    // Rapid-clear: if ALL detection sources are silent for N consecutive cycles,
-    // skip cooldown decay and jump directly to CLEAR. Gives operator fast
-    // feedback that the threat has left.
-    // Rapid-clear: explicit check that ALL detection sources are silent.
-    // Score-based check was inconsistent (EU RSSI at 5 pts passed, US at 10 didn't).
-    bool allClean = (diversityCountThisCycle == 0)
-                    && (cadDetectionsThisCycle == 0)
-                    && (fskDetectionsThisCycle == 0)
-                    && !bandEnergyElevated;
-
-    if (allClean) {
-        if (cleanSinceMs == 0) cleanSinceMs = now;
-        if ((now - cleanSinceMs) >= RAPID_CLEAR_CLEAN_MS && legacyThreat >= THREAT_WARNING) {
-            Serial.printf("[RAPID-CLEAR] %lums clean — forcing CLEAR\n", now - cleanSinceMs);
-            desired = THREAT_CLEAR;
-            cleanSinceMs = 0;
-            lastThreatEventMs = now;
-        }
-    } else {
-        cleanSinceMs = 0;
-    }
-
-    // Sustained-CLEAR diversity reset: if CLEAR for 60 continuous seconds,
-    // reset the diversity tracker to prevent slow drift on LoRa-rich bench.
-    if (desired == THREAT_CLEAR && legacyThreat == THREAT_CLEAR) {
-        if (clearSinceMs == 0) clearSinceMs = now;
-        else if ((now - clearSinceMs) > 60000) {
-            resetDiversityTracker();
-            clearSinceMs = now;
-        }
-    } else {
-        clearSinceMs = 0;
-    }
-
-    // Phase D Stabilization: the legacy event-emit block (CAD/FSK/proto/peak
-    // events on legacy transitions) has been removed. Alert events are now
-    // emitted from detectionEngineAssess() on candidate FSM transitions via
-    // emitCandidateThreatEvent(). assessThreat() returns desired for
-    // [CAND-DELTA] regression-alarm comparison only and has no side effects
-    // beyond updating its private legacyThreat/lastThreatEventMs state.
-    (void)prevThreat;
-    return desired;
-}
+// Phase G: the legacy assessThreat() scorer was removed here. It had been
+// kept in Phase D as a comparison-only shadow for [CAND-DELTA] regression
+// logging, but the candidate engine has been the sole decision path since
+// commit aaaa6e9. With Phase G the shadow path, its `legacyThreat` static,
+// its `cleanSinceMs`/`lastThreatEventMs` timers, and the associated
+// [CAND-DELTA] emit in detectionEngineAssess() are all gone. See the
+// Phase G section of the Detection Engine v2 spec for rationale.
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -1053,14 +868,6 @@ void detectionEngineInit() {
     memset(tracked, 0, sizeof(tracked));
     memset(tracked24, 0, sizeof(tracked24));
     memset(protoTracked, 0, sizeof(protoTracked));
-    cadDetectionsThisCycle = 0;
-    fskDetectionsThisCycle = 0;
-    strongPendingCadThisCycle = 0;
-    totalActiveTapsThisCycle = 0;
-    diversityCountThisCycle = 0;
-    persistentDiversityThisCycle = 0;
-    diversityVelocityThisCycle = 0;
-    sustainedDiversityCyclesThisCycle = 0;
     memset(bandEnergyHistoryUS, 0, sizeof(bandEnergyHistoryUS));
     memset(bandEnergyHistoryEU, 0, sizeof(bandEnergyHistoryEU));
     bandEnergyIdxUS = 0; bandEnergySamplesUS = 0; bandEnergyElevatedUS = false;
@@ -1068,8 +875,6 @@ void detectionEngineInit() {
     bandEnergyElevated = false;
     clearSinceMs = 0;
     currentThreat = THREAT_CLEAR;
-    legacyThreat  = THREAT_CLEAR;
-    lastThreatEventMs = 0;
     candidateThreatEventMs = 0;
     ambientFilterInit();
 }
@@ -1077,6 +882,11 @@ void detectionEngineInit() {
 int detectionEngineGetScore() { return (lastScore > 100) ? 100 : lastScore; }
 int detectionEngineGetFastScore() { return lastFastScore; }
 int detectionEngineGetConfirmScore() { return lastConfirmScore; }
+
+float   detectionEngineGetAnchorFreq()     { return lastAnchorFreq; }
+uint8_t detectionEngineGetBandMask()       { return lastBandMask; }
+bool    detectionEngineHasCandidate()      { return lastHasCandidate; }
+int     detectionEngineGetCandidateCount() { return lastCandidateCount; }
 
 uint32_t getLastDetectionMs() { return lastDetectionMs; }
 
@@ -1087,20 +897,6 @@ uint32_t getLastDetectionMs() { return lastDetectionMs; }
 static uint32_t lastProcessedSweepSeq = 0;
 static uint32_t lastProcessed24Seq = 0;
 
-void detectionEngineIngestCad(int cadCount, int fskCount, int strongPendingCad,
-                              int activeTaps, int diversityCount,
-                              int persistentDiversity, int diversityVelocity,
-                              int sustainedCycles) {
-    cadDetectionsThisCycle = cadCount;
-    fskDetectionsThisCycle = fskCount;
-    strongPendingCadThisCycle = strongPendingCad;
-    totalActiveTapsThisCycle = activeTaps;
-    diversityCountThisCycle = diversityCount;
-    persistentDiversityThisCycle = persistentDiversity;
-    diversityVelocityThisCycle = diversityVelocity;
-    sustainedDiversityCyclesThisCycle = sustainedCycles;
-}
-
 void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan24) {
     // Reject duplicate sweeps — safety net. scannerSweep() increments seq on
     // every call, so consecutive calls never share a seq; this guards against
@@ -1110,7 +906,6 @@ void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan
     }
     lastProcessedSweepSeq = scan.seq;
 
-    freshRssiThisCycle = true;
     ambientFilterUpdate(scan);
     updateBandEnergy(scan.rssi);
 
@@ -1513,14 +1308,9 @@ static ThreatDecision evaluateCandidateEngine(const GpsData& gps,
 }
 
 ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& integrity) {
-    // Phase D+: legacy assessThreat() is comparison-only — it does not commit
-    // currentThreat or emit FSM transitions. Its returned level is logged
-    // against the candidate decision via [CAND-DELTA] for regression-alarm.
-    ThreatLevel legacyLevel = assessThreat(integrity);
-
-    // Candidate engine is the primary (and only) threat decider as of Phase D.
-    // Phase E: gps is now passed through to evaluateCandidateEngine so the
-    // gnss readiness gate can check fixType.
+    // Phase G: candidate engine is the sole threat decider. The legacy
+    // assessThreat() shadow path and the [CAND-DELTA] regression-alarm
+    // logging that compared the two have been removed.
     const uint32_t nowMs = (uint32_t)millis();
     ThreatDecision decision = evaluateCandidateEngine(gps, integrity, nowMs);
 
@@ -1529,6 +1319,18 @@ ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& int
     lastConfirmScore = (int)decision.confirmScore;
     lastScore        = (int)decision.fastScore + (int)decision.confirmScore;
     if (decision.level >= THREAT_ADVISORY) lastDetectionMs = nowMs;
+
+    // Phase G: mirror candidate engine diagnostics for SystemState/display.
+    lastAnchorFreq   = decision.anchorFreq;
+    lastBandMask     = decision.bandMask;
+    lastHasCandidate = decision.hasCandidate;
+    {
+        int activeCandidates = 0;
+        for (uint8_t i = 0; i < MAX_CANDIDATES; i++) {
+            if (candidatePool[i].active) activeCandidates++;
+        }
+        lastCandidateCount = activeCandidates;
+    }
 
     // ── Candidate FSM: fast-up / slow-down hysteresis (Phase D, preserved) ──
     // DO NOT replace with currentThreat = decision.level (raw assignment).
@@ -1571,43 +1373,16 @@ ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& int
     // Fire transition emitter — drives buzzer / LED / OLED / [FSM] log
     emitThreatTransition(prevThreat, currentThreat, nowMs);
 
-    // Phase D Stabilization: alert queue emit on candidate FSM transition.
-    // Replaces the legacy per-source emit block in assessThreat().
+    // Alert queue emit on candidate FSM transition (Phase G: this is now
+    // the only emit path — the legacy per-source block is gone).
     if (prevThreat != currentThreat) {
         emitCandidateThreatEvent(currentThreat, decision.anchorFreq);
     }
 
-    // Regression alarm: log when legacy and candidate disagree. In Phase C
-    // this was a comparison log; in Phase D it's a regression alarm — the
-    // candidate decision IS the threat output.
-    if (currentThreat != legacyLevel) {
-        Serial.printf("[CAND-DELTA] legacy=%s candidate=%s\n",
-                      threatName(legacyLevel), threatName(currentThreat));
-    }
-
-    // Reset freshRssiThisCycle so the NEXT non-sweep cycle's confirm score
-    // doesn't re-use RSSI-derived evidence from the previous sweep.
-    freshRssiThisCycle = false;
     return currentThreat;
 }
 
-// ── Deprecated backward-compat wrappers ───────────────────────────────────
-
-void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad,
-                              int activeTaps, int diversityCount,
-                              int persistentDiversity, int diversityVelocity,
-                              int sustainedCycles) {
-    detectionEngineIngestCad(cadCount, fskCount, strongPendingCad, activeTaps,
-                             diversityCount, persistentDiversity,
-                             diversityVelocity, sustainedCycles);
-}
-
-ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
-                                  const IntegrityStatus& integrity,
-                                  const ScanResult24* scan24,
-                                  bool freshRssi) {
-    if (freshRssi) {
-        detectionEngineIngestSweep(scan, scan24);
-    }
-    return detectionEngineAssess(gps, integrity);
-}
+// Phase G: removed detectionEngineSetCadFsk() and detectionEngineUpdate()
+// backward-compat wrappers. They were thin shims around the split ingest/
+// assess API, had no callers outside detection_engine.cpp itself, and
+// pointed at functions (detectionEngineIngestCad) that are now gone.

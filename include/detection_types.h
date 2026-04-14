@@ -39,6 +39,15 @@ struct SystemState {
     int             cadConfirmed;
     int             cadTotalTaps;
     int             confidenceScore;
+    // Phase G: candidate engine diagnostics — mirrored from ThreatDecision
+    // each cycle so display and logger can show what the candidate engine
+    // is actually doing without reaching into detection_engine internals.
+    int             fastScore;
+    int             confirmScore;
+    float           anchorFreq;       // MHz (0.0 when no candidate)
+    uint8_t         bandMask;         // bit0=sub-GHz, bit1=2.4 GHz
+    bool            hasCandidate;
+    int             candidateCount;
     // WiFi Remote ID (written by wifiScanTask)
     bool            remoteIdDetected;
     unsigned long   remoteIdLastMs;

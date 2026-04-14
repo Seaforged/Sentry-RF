@@ -556,9 +556,17 @@ void screenThreat(Adafruit_SSD1306& disp, const SystemState& state, int page) {
         disp.print("Bearing: --");
     }
 
-    if (state.threatLevel >= THREAT_ADVISORY && getLastDetectionMs() > 0) {
+    // Phase G: show live candidate engine diagnostics when a candidate is
+    // active; otherwise fall back to the "LAST: Xs ago" line. The two are
+    // mutually exclusive on y=52 — there's no room for both.
+    disp.setCursor(0, 52);
+    if (state.hasCandidate) {
+        // CAND: A=XXX.X B=XX F=XX C=XX — anchor MHz, bandMask hex, fast, confirm
+        disp.printf("CAND:%.0f B%X F%d C%d",
+                    state.anchorFreq, state.bandMask,
+                    state.fastScore, state.confirmScore);
+    } else if (state.threatLevel >= THREAT_ADVISORY && getLastDetectionMs() > 0) {
         uint32_t ago = (millis() - getLastDetectionMs()) / 1000;
-        disp.setCursor(0, 52);
         disp.printf("LAST: %lus ago", ago);
     }
 
