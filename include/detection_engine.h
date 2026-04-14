@@ -10,17 +10,9 @@
 void detectionEngineInit();
 
 // ── Refactor 3: split ingest/assess ────────────────────────────────────────
-// The old monolithic detectionEngineUpdate() is preserved below as a thin
-// wrapper for backward compatibility, but new code should call these three
-// functions directly so CAD/sweep ingest is decoupled from threat assessment.
-
-// Ingest aggregate CAD/FSK results — retained for the legacy comparison scorer
-// that powers [CAND-DELTA]. The real candidate path ingests CadBandSummary
-// separately via detectionEngineIngestCadBandSummary().
-void detectionEngineIngestCad(int cadCount, int fskCount, int strongPendingCad,
-                              int activeTaps, int diversityCount,
-                              int persistentDiversity, int diversityVelocity,
-                              int sustainedCycles);
+// The candidate engine is the sole decision path as of Phase G. Callers feed
+// CadBandSummary + ScanResult into the engine, then call detectionEngineAssess()
+// to compute the committed threat level.
 
 // Ingest full sub-GHz CadBandSummary (anchor + counts + timestamps) into the
 // real candidate engine. Called from loRaScanTask alongside the legacy
@@ -39,40 +31,30 @@ void detectionEngineIngestCad24BandSummary(const struct CadBandSummary& band24);
 void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan24 = nullptr);
 
 // Run threat assessment — called every cycle. Reads cached state from both
-// ingest functions, evaluates the candidate engine, and applies the real FSM.
-// The legacy assessThreat() path still runs for comparison-only [CAND-DELTA]
-// logging.
+// ingest functions, evaluates the candidate engine, applies the FSM, and
+// caches the last ThreatDecision for the accessors below.
 ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& integrity);
-
-// Feed CAD and FSK detection counts before calling detectionEngineUpdate().
-// DEPRECATED: thin wrapper around detectionEngineIngestCad(). Use the new
-// function directly in new code.
-void detectionEngineSetCadFsk(int cadCount, int fskCount, int strongPendingCad = 0,
-                              int activeTaps = 0, int diversityCount = 0,
-                              int persistentDiversity = 0, int diversityVelocity = 0,
-                              int sustainedCycles = 0);
-
-// Run detection pipeline: peak extraction → freq matching → persistence → threat FSM.
-// DEPRECATED: thin wrapper around detectionEngineIngestSweep + detectionEngineAssess.
-// Called from loRaScanTask after each sweep. NOT thread-safe — single caller only.
-ThreatLevel detectionEngineUpdate(const ScanResult& scan, const GpsData& gps,
-                                  const IntegrityStatus& integrity,
-                                  const ScanResult24* scan24 = nullptr,
-                                  bool freshRssi = false);
 
 // Get the last computed confidence score (for logging/display)
 int detectionEngineGetScore();
 int detectionEngineGetFastScore();
 int detectionEngineGetConfirmScore();
 
+// Phase G: expose the last ThreatDecision fields so the display/logger can
+// mirror them into SystemState without reaching into detection_engine internals.
+float   detectionEngineGetAnchorFreq();
+uint8_t detectionEngineGetBandMask();
+bool    detectionEngineHasCandidate();
+int     detectionEngineGetCandidateCount();
+
 // Timestamp of the most recent detection event that scored ADVISORY or higher.
 uint32_t getLastDetectionMs();
 
 // ── Candidate engine data structures (introduced Phase C, cutover Phase D) ─
-// As of Phase D, the candidate engine is the sole driver of currentThreat
-// and emitThreatTransition(). Legacy assessThreat() still runs but is
-// comparison-only — its result is logged via [CAND-DELTA] for regression
-// alarming. Per-evidence readiness gates were added in Phase E (spec Part 7).
+// As of Phase G, the candidate engine is the sole threat decider. The legacy
+// assessThreat() comparison path and its [CAND-DELTA] regression-alarm logging
+// have been removed. Per-evidence readiness gates were added in Phase E
+// (spec Part 7) and remain the gate logic for candidate evidence attachment.
 
 enum CandidateState : uint8_t {
     CAND_EMPTY,

@@ -1,5 +1,5 @@
 <!-- ACTIVE SPEC — supersedes SENTRY-RF_Detection_Engine_v2_Redesign.md and SENTRY-RF_Architecture_Checklist.md -->
-<!-- Last updated: April 14, 2026 | Current phase: F -->
+<!-- Last updated: April 14, 2026 | Current phase: COMPLETE -->
 
 # SENTRY-RF Detection Engine v2.0 — Unified Implementation Spec
 ## Candidate-Centric Evidence Fusion: The Build Contract
@@ -561,16 +561,43 @@ Replace `cycleCount % RSSI_SWEEP_INTERVAL` with `millis() >= nextSubGHzSweepMs`.
 **Risk:** Zero — additive  
 **Acceptance:** Build clean with zero new warnings. Legacy scoring code gone.
 
-**G.1 — Expose candidate diagnostics to `SystemState`**  
-Add `fastScore`, `confirmScore`, `anchorFreq`, `bandMask`, `hasCandidate`, `candidateCount`. Surface on OLED threat screen and serial.
+**Status: COMPLETE — April 14, 2026**
+Legacy `assessThreat()` removed. Candidate engine is now the sole decision
+path for `currentThreat` and FSM transitions. `[CAND-DELTA]` logging removed.
+`legacyThreat`, `lastThreatEventMs`, `cleanSinceMs`, `freshRssiThisCycle`, and
+the `*ThisCycle` aggregate counters removed along with their populate shim
+`detectionEngineIngestCad()` and the dead backward-compat wrappers
+`detectionEngineSetCadFsk()` / `detectionEngineUpdate()`.
 
-**G.2 — Delete legacy code**  
-Remove deprecated aggregate `CadFskResult`. Remove legacy global scorer. Remove legacy wrapper functions. Remove legacy weight constants from `sentry_config.h`.
+**G.1 — Expose candidate diagnostics to `SystemState`** ✅
+Added `fastScore`, `confirmScore`, `anchorFreq`, `bandMask`, `hasCandidate`,
+`candidateCount` to `SystemState`. Mirrored from `ThreatDecision` inside
+`detectionEngineAssess()` via new accessors (`detectionEngineGetAnchorFreq()`,
+etc). Shown on OLED threat screen as a `CAND:` line when a candidate is
+active (replaces the `LAST: Xs ago` fallback line). Already logged via
+`[CAND]` serial line.
 
-**G.3 — Fix version string**  
-`main.cpp:422` — update to current version string.
+**G.2 — Delete legacy code** ✅
+Removed `assessThreat()` (173 lines), `legacyThreat`, `lastThreatEventMs`,
+`cleanSinceMs`, `freshRssiThisCycle`, and the eight `*ThisCycle` aggregate
+counters. Removed `detectionEngineIngestCad()`, `detectionEngineSetCadFsk()`,
+`detectionEngineUpdate()`. Removed 20 legacy weight and threshold constants
+from `sentry_config.h` (`WEIGHT_DIVERSITY_PER_FREQ` through
+`WEIGHT_FAST_DETECT`, `SCORE_ADVISORY/WARNING/CRITICAL`,
+`FAST_DETECT_MIN_*`, `FAST_ADVISORY_THRESH`, `FAST_WARNING_THRESH`,
+`CONFIRM_WARNING_THRESH`, `CONFIRM_CRITICAL_THRESH`, `CONFIRM_ADVISORY_THRESH`,
+`WEIGHT_FAST_PERSISTENT_DIV`, `WEIGHT_FAST_FHSS_VELOCITY`). Kept the five
+`WEIGHT_CONFIRM_*` constants that the candidate engine actively consumes.
+Kept `CadFskResult` — it's the live data-transfer struct between
+`cadFskScan()` and the candidate engine, not a legacy artifact.
 
-**G.4 — Update README and roadmap.**
+**G.3 — Fix version string** ✅
+`include/version.h` — bumped `FW_VERSION` from `"1.6.0"` to `"1.9.0-rc1"`
+with a phase-completion note.
+
+**G.4 — Spec doc updated** ✅
+Phase marker moved from `F` to `COMPLETE`, this section stamped with the
+completion status.
 
 ---
 
