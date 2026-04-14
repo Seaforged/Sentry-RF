@@ -47,6 +47,41 @@ static void evaluateJamming(const GpsData& gps, IntegrityStatus& status) {
     status.jammingDetected = (gps.jammingState >= 2) || (gps.jamInd > JAM_IND_THRESH);
 }
 
+// Position jump: sudden >100 m teleport with a tight hAcc is a strong spoofing
+// indicator. Real drift stays small; a spoofer flipping its simulated position
+// produces a hard step while the receiver still reports high confidence.
+// Static locals persist the previous valid fix across calls — no struct field
+// needed since state only matters inside this module.
+static void evaluatePositionJump(const GpsData& gps, IntegrityStatus& status) {
+    if (gps.fixType < 3) return;
+
+    float hAccM = gps.hAccMM / 1000.0f;
+    if (hAccM >= GNSS_POSITION_JUMP_HACC_MAX_M) return;
+
+    float lat = gps.latDeg7 / 1e7f;
+    float lon = gps.lonDeg7 / 1e7f;
+
+    static bool  havePrev = false;
+    static float prevLat  = 0.0f;
+    static float prevLon  = 0.0f;
+
+    if (havePrev) {
+        const float degToRad = (float)(M_PI / 180.0);
+        float dLat = (lat - prevLat) * 111320.0f;                         // meters per degree
+        float dLon = (lon - prevLon) * 111320.0f * cosf(lat * degToRad);
+        float distM = sqrtf(dLat * dLat + dLon * dLon);
+        if (distM > GNSS_POSITION_JUMP_THRESHOLD_M) {
+            status.positionJumpDetected = true;
+            Serial.printf("[GNSS] position jump %.0fm (hAcc=%.1fm) — SPOOFING INDICATOR\n",
+                          distM, hAccM);
+        }
+    }
+
+    prevLat  = lat;
+    prevLon  = lon;
+    havePrev = true;
+}
+
 static void evaluateSpoofing(const GpsData& gps, IntegrityStatus& status) {
     // M10 built-in spoofing detector in NAV-STATUS
     bool hwSpoof = (gps.spoofDetState >= 2);
@@ -57,7 +92,10 @@ static void evaluateSpoofing(const GpsData& gps, IntegrityStatus& status) {
     status.cnoAnomalyDetected = (status.cnoStdDev < CNO_STDDEV_SPOOF_THRESH)
                                 && (status.cnoStdDev >= 0.0);
 
-    status.spoofingDetected = hwSpoof || status.cnoAnomalyDetected;
+    evaluatePositionJump(gps, status);
+
+    status.spoofingDetected = hwSpoof || status.cnoAnomalyDetected
+                              || status.positionJumpDetected;
 }
 
 static void evaluateThreatLevel(IntegrityStatus& status) {
@@ -77,11 +115,12 @@ static void evaluateThreatLevel(IntegrityStatus& status) {
 
 void integrityUpdate(const GpsData& gps, IntegrityStatus& status) {
     // Reset output fields — prevents stale true values carrying across cycles
-    status.jammingDetected   = false;
-    status.spoofingDetected  = false;
+    status.jammingDetected    = false;
+    status.spoofingDetected   = false;
     status.cnoAnomalyDetected = false;
-    status.threatLevel       = 0;
-    status.cnoStdDev         = 99.0;
+    status.positionJumpDetected = false;
+    status.threatLevel        = 0;
+    status.cnoStdDev          = 99.0;
 
     // Don't run detection on uninitialized sensor data — MON-HW and NAV-SAT
     // auto packets haven't arrived yet if all values are still zero

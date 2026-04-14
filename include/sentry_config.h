@@ -116,6 +116,18 @@ static const uint8_t GPS_MIN_CNO           = 15;    // dB-Hz minimum (6=indoor b
 static const float CNO_STDDEV_SPOOF_THRESH = 2.0f;  // dB-Hz — below this = spoofing suspected
 static const int   MIN_ELEV_FOR_CNO        = 20;    // degrees — exclude low-elevation sats
 
+// Position jump spoofing detector — >100 m step with hAcc <10 m = teleport.
+// Only counts when the fix is otherwise high-confidence, so natural drift
+// during poor-fix conditions doesn't flag.
+#define GNSS_POSITION_JUMP_THRESHOLD_M  100.0f
+#define GNSS_POSITION_JUMP_HACC_MAX_M   10.0f
+
+// RF-GNSS temporal correlation window. GNSS anomaly evidence only attaches
+// to a candidate when an RF-side ADVISORY crossing happened in the last 30s
+// — prevents a standalone GNSS anomaly (e.g. driving under a bridge) from
+// promoting an unrelated infrastructure-seeded candidate.
+#define GNSS_RF_CORRELATION_WINDOW_MS  30000
+
 // ── Confidence Scoring Weights ────────────────────────────────────────
 // ── Two-layer scorer (v1.8.0) ────────────────────────────────────────
 // Fast score: CAD-only evidence. Updates every cycle. Drives ADVISORY.
@@ -165,6 +177,12 @@ static const unsigned long REMINDER_INTERVAL = 30000;  // 30 seconds
 // --- Candidate engine sizing ---
 #define MAX_CANDIDATES              6
 #define CAND_AGE_OUT_MS             12000   // Evict if all evidence dead > 12s
+#define CAND_INFRA_PROBATION_MS     AMBIENT_AUTOLEARN_MS
+// Treat new sub-GHz candidates as infrastructure-like until they either pick
+// up stronger corroboration or survive the ambient auto-learn window. 4 MHz is
+// loose enough to allow modest anchor drift while still distinguishing a
+// narrow/fixed emitter from wide FHSS spread.
+#define CAND_INFRA_NARROW_SPAN_MHZ  4.0f
 
 // --- Association windows ---
 #define CAND_ASSOC_SUB_MHZ          1.0f    // Sub-GHz evidence must be within ±1 MHz of anchor

@@ -2,8 +2,10 @@
 #include "drone_signatures.h"
 #include "ambient_filter.h"
 #include "cad_scanner.h"
+#include "rf_scanner.h"
 #include "sentry_config.h"
 #include <Arduino.h>
+#include <math.h>
 #include <string.h>
 
 // ── Tracked signal persistence ──────────────────────────────────────────────
@@ -117,6 +119,12 @@ static ThreatLevel legacyThreat = THREAT_CLEAR;
 static uint32_t candidateThreatEventMs = 0;
 static unsigned long lastThreatEventMs = 0;
 static uint32_t lastDetectionMs = 0;
+
+// Last wall time (millis) a candidate crossed the ADVISORY fast-score
+// threshold. Used by the GNSS temporal correlation gate (Phase 3.3) — GNSS
+// anomaly evidence only contributes to confirm score if RF detection was
+// active recently. 0 means "never", treated as not-active regardless of age.
+static uint32_t lastRfDetectionMs = 0;
 // COOLDOWN_MS from sentry_config.h
 static unsigned long cleanSinceMs = 0;  // wall-clock time when allClean became true
 static unsigned long clearSinceMs = 0;
@@ -174,6 +182,11 @@ static void refreshEvidence(EvidenceTerm& e, uint8_t score, uint32_t ttlMs,
 // (CAD/FSK/FHSS/cluster) evidence? Used as one of the three ways to satisfy
 // the sweepSub readiness gate (see Part 7).
 static bool candHasLiveFastEvidence(const DetectionCandidate& c, uint32_t nowMs);
+static bool candidateHasValidatedClusterEvidence(const DetectionCandidate& c, uint32_t nowMs);
+static bool candidateHasStrongSubGHzCorroboration(const DetectionCandidate& c, uint32_t nowMs);
+static bool candidateHasProbationReleaseEvidence(const DetectionCandidate& c, uint32_t nowMs);
+static bool candidateNeedsInfraProbation(const DetectionCandidate& c, uint32_t nowMs);
+static bool candidateCanAccept24Confirmer(const DetectionCandidate& c, uint32_t nowMs);
 
 static bool allEvidenceDead(const DetectionCandidate& c, uint32_t nowMs) {
     return !evidenceLive(c.cadConfirmed, nowMs) &&
@@ -201,6 +214,46 @@ static bool candHasLiveFastEvidence(const DetectionCandidate& c, uint32_t nowMs)
            evidenceLive(c.fskConfirmed, nowMs) ||
            evidenceLive(c.fhssSub,      nowMs) ||
            evidenceLive(c.fhssCluster,  nowMs);
+}
+
+static float candidateFreqSpanMhz(const DetectionCandidate& c) {
+    float span = c.maxFreqSeen - c.minFreqSeen;
+    return (span > 0.0f) ? span : 0.0f;
+}
+
+// fhssCluster is sourced from the aggregate sub-GHz band summary. Before it
+// can influence a single candidate, require that candidate's own observed
+// anchor spread to widen beyond the narrowband / infrastructure-like range.
+static bool candidateHasValidatedClusterEvidence(const DetectionCandidate& c, uint32_t nowMs) {
+    return evidenceLive(c.fhssCluster, nowMs) &&
+           candidateFreqSpanMhz(c) > CAND_INFRA_NARROW_SPAN_MHZ;
+}
+
+// Release/attach gate for broad-spectrum sub-GHz corroboration. A validated
+// cluster plus elevated band energy is strong enough to look like real FHSS;
+// weaker single-source corroborators (sweepSub, protoSub) still add confirm
+// score but do not release probation or unlock cross-band attachment.
+static bool candidateHasStrongSubGHzCorroboration(const DetectionCandidate& c, uint32_t nowMs) {
+    return candidateHasValidatedClusterEvidence(c, nowMs) &&
+           evidenceLive(c.bandEnergy, nowMs);
+}
+
+static bool candidateHasProbationReleaseEvidence(const DetectionCandidate& c, uint32_t nowMs) {
+    return evidenceLive(c.fskConfirmed, nowMs) ||
+           evidenceLive(c.rid,          nowMs) ||
+           evidenceLive(c.gnss,         nowMs) ||
+           candidateHasStrongSubGHzCorroboration(c, nowMs);
+}
+
+static bool candidateNeedsInfraProbation(const DetectionCandidate& c, uint32_t nowMs) {
+    if (!c.active || !(c.bandMask & 0x01)) return false;
+    if ((nowMs - c.firstSeenMs) >= CAND_INFRA_PROBATION_MS) return false;
+    if (candidateHasProbationReleaseEvidence(c, nowMs)) return false;
+    return candidateFreqSpanMhz(c) <= CAND_INFRA_NARROW_SPAN_MHZ;
+}
+
+static bool candidateCanAccept24Confirmer(const DetectionCandidate& c, uint32_t nowMs) {
+    return candidateHasStrongSubGHzCorroboration(c, nowMs);
 }
 
 static void ageOutCandidates(DetectionCandidate* pool, uint8_t count, uint32_t nowMs) {
@@ -283,7 +336,7 @@ static uint8_t computeFastScore(const DetectionCandidate& c, uint32_t nowMs) {
     // the cluster evidence term is live (anchor + spread + fast-confirmed),
     // adding FAST_SCORE_FHSS_CLUSTER points so 1 confirmed sub-GHz tap (10) +
     // diversity bonus (20) + cluster (15) = 45 → crosses WARNING fast threshold.
-    uint16_t clusterBonus = evidenceLive(c.fhssCluster, nowMs)
+    uint16_t clusterBonus = candidateHasValidatedClusterEvidence(c, nowMs)
                                 ? (uint16_t)evidenceScore(c.fhssCluster, nowMs)
                                 : (uint16_t)0;
 
@@ -338,6 +391,7 @@ static ThreatDecision chooseBestCandidate(DetectionCandidate* pool, uint8_t coun
 
         uint8_t fast = computeFastScore(c, nowMs);
         uint8_t confirm = computeConfirmScore(c, nowMs);
+        bool infraProbation = candidateNeedsInfraProbation(c, nowMs);
 
         ThreatLevel level = THREAT_CLEAR;
         if (fast >= POLICY_CRITICAL_FAST && confirm >= POLICY_CRITICAL_CONFIRM) {
@@ -349,6 +403,14 @@ static ThreatDecision chooseBestCandidate(DetectionCandidate* pool, uint8_t coun
         } else if (evidenceLive(c.rid, nowMs) && c.rid.score >= POLICY_RID_ONLY_ADVISORY) {
             // RID-only path: no fast evidence required
             level = THREAT_ADVISORY;
+        }
+
+        // Bridge the post-warmup ambient auto-learn gap: let infrastructure-
+        // like sub-GHz candidates accumulate evidence locally, but keep them
+        // off the operator-facing FSM until they either pick up stronger
+        // corroboration or age past the probation window.
+        if (infraProbation && level >= THREAT_ADVISORY) {
+            level = THREAT_CLEAR;
         }
 
         // Promote to CAND_CONFIRMED on first WARNING+ crossing
@@ -1023,7 +1085,10 @@ void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan
     updateBandEnergy(scan.rssi);
 
     // Sub-GHz RSSI pipeline
-    float noiseFloor = computeNoiseFloor(scan.rssi, SCAN_BIN_COUNT);
+    // Use IIR adaptive noise floor (dual time constant, rf_scanner.cpp)
+    // instead of per-sweep median — adapts across cycles, not just within
+    // the current sweep. Fixes LR1121 warmup false-floor behavior.
+    float noiseFloor = getAdaptiveNoiseFloor();
     DetectedPeak peaks[MAX_PEAKS];
     int peakCount = extractPeaks(scan, noiseFloor, peaks);
 
@@ -1160,7 +1225,8 @@ void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan
             bool canAttachProto24 = (liveSubGHzCount == 1) ||
                                     (liveSubGHzCount >= 2 &&
                                      (uint16_t)bestFast >= (uint16_t)secondFast + 15);
-            if (canAttachProto24 && bestSubGHz) {
+            if (canAttachProto24 && bestSubGHz &&
+                candidateCanAccept24Confirmer(*bestSubGHz, nowMs)) {
                 refreshEvidence(bestSubGHz->proto24,
                                 (uint8_t)WEIGHT_CONFIRM_PROTO,
                                 TTL_PROTO24_MS, nowMs, /*ready=*/true);
@@ -1342,9 +1408,11 @@ static ThreatDecision evaluateCandidateEngine(const GpsData& gps,
                 canAttach24 = true;  // dominant candidate
             }
 
-            if (canAttach24 && bestSubGHz) {
-                // Phase E: cad24 readiness — confirmer-only on existing live
-                // sub-GHz candidate. The lone/dominant guard above IS the gate.
+            if (canAttach24 && bestSubGHz &&
+                candidateCanAccept24Confirmer(*bestSubGHz, nowMs)) {
+                // 2.4 GHz CAD remains confirmer-only. In addition to the
+                // lone/dominant association guard above, require strong
+                // corroborated sub-GHz FHSS evidence before cross-band attach.
                 refreshEvidence(bestSubGHz->cad24, 10, TTL_CAD24_MS, nowMs,
                                 /*ready=*/true);
                 bestSubGHz->bandMask |= 0x02;
@@ -1375,13 +1443,28 @@ static ThreatDecision evaluateCandidateEngine(const GpsData& gps,
         if (candidatePool[i].active) {
             activeCount++;
             loneCandidate = &candidatePool[i];
+            // Phase 3.3: stamp RF detection time whenever any candidate meets
+            // the ADVISORY fast-score threshold this cycle. Used by the GNSS
+            // temporal gate below.
+            if (computeFastScore(candidatePool[i], nowMs) >= POLICY_ADVISORY_FAST) {
+                lastRfDetectionMs = nowMs;
+            }
         }
     }
 
     // Phase E readiness gates:
     //  - rid: always ready (independent hardware)
-    //  - gnss: ready only when GPS has a valid 3D fix
-    bool gnssReady = (gps.fixType >= 3);
+    //  - gnss: ready only when GPS has a valid 3D fix AND an RF detection was
+    //    active within GNSS_RF_CORRELATION_WINDOW_MS (Phase 3.3).
+    //
+    // GNSS anomaly only contributes to candidate confirm score when RF
+    // detection has been active within the last 30s. This prevents a
+    // standalone GNSS anomaly (e.g., driving under a bridge) from
+    // accumulating confirm evidence on a candidate that was seeded by
+    // unrelated infrastructure noise.
+    bool rfRecentlyActive = (lastRfDetectionMs != 0) &&
+                            ((nowMs - lastRfDetectionMs) < GNSS_RF_CORRELATION_WINDOW_MS);
+    bool gnssReady = (gps.fixType >= 3) && rfRecentlyActive;
 
     if (activeCount == 1 && loneCandidate != nullptr) {
         if (ridFresh) {

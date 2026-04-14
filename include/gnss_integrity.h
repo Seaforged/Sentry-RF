@@ -9,6 +9,7 @@ struct IntegrityStatus {
     bool  jammingDetected;
     bool  spoofingDetected;
     bool  cnoAnomalyDetected;
+    bool  positionJumpDetected;  // >100 m teleport with tight hAcc — spoofing indicator
     float cnoStdDev;
     uint8_t threatLevel;       // 0=clear, 1=advisory, 2=warning, 3=critical
 };
