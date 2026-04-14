@@ -232,7 +232,7 @@ Add all of the following to `include/sentry_config.h`. These are the values as o
 #define FAST_SCORE_FSK_PER_TAP      15
 #define FAST_SCORE_FSK_CAP          30
 #define FAST_SCORE_DIVERSITY_BONUS  20
-#define FAST_SCORE_FHSS_BONUS       15
+#define FAST_SCORE_FHSS_CLUSTER     15
 ```
 
 ---
@@ -306,7 +306,8 @@ These gates determine whether each evidence type is allowed to contribute to sco
 | `cadConfirmed` | Always (cycle 1) |
 | `cadPending` | Always (cycle 1) |
 | `fskConfirmed` | Always (cycle 1) |
-| `fhssSub` | Always (cycle 1) |
+| `fhssSub` | `persistentDiversityCount > 0` OR `diversityVelocity >= DIVERSITY_VELOCITY_FHSS_MIN` |
+| `fhssCluster` | `diversityCount >= 8` AND `fastConfirmedCadCount >= 1` |
 | `sweepSub` | `ambientFilterReady()` OR peak matches a known protocol family OR candidate already has live fast evidence |
 | `protoSub` | Always when `match.protocol != nullptr` |
 | `bandEnergy` | `ambientFilterReady()` only; attach as candidate-confirm only |
@@ -361,19 +362,33 @@ Scoring uses **candidate-attached evidence only**. Global scores do not exist in
 ### Fast score (per candidate)
 
 ```
-fast = cadConfirmed.score + cadPending.score + fskConfirmed.score + fhssSub.score
+fast = cadConfirmed.score
+     + cadPending.score
+     + fskConfirmed.score
+     + (fhssSub live     ? FAST_SCORE_DIVERSITY_BONUS : 0)
+     + (fhssCluster live ? FAST_SCORE_FHSS_CLUSTER    : 0)
 ```
 
 Component values:
 - Confirmed CAD taps: `FAST_SCORE_CAD_PER_TAP` per tap, cap `FAST_SCORE_CAD_CAP`
 - Confirmed FSK taps: `FAST_SCORE_FSK_PER_TAP` per tap, cap `FAST_SCORE_FSK_CAP`
-- Persistent diversity > 0: `+FAST_SCORE_DIVERSITY_BONUS`
-- FHSS velocity at threshold: `+FAST_SCORE_FHSS_BONUS`
+- `fhssSub` live when sustained diversity is present:
+  `persistentDiversityCount > 0` OR
+  `diversityVelocity >= DIVERSITY_VELOCITY_FHSS_MIN`
+- Live `fhssSub`: `+FAST_SCORE_DIVERSITY_BONUS`
+- Live `fhssCluster`: `+FAST_SCORE_FHSS_CLUSTER`
+  with `diversityCount >= 8` AND `fastConfirmedCadCount >= 1`
 
 ### Confirm score (per candidate)
 
 ```
-confirm = sweepSub.score + protoSub.score + cad24.score + proto24.score + rid.score + gnss.score
+confirm = sweepSub.score
+        + protoSub.score
+        + bandEnergy.score
+        + cad24.score
+        + proto24.score
+        + rid.score
+        + gnss.score
 ```
 
 Component values:
@@ -494,13 +509,20 @@ Bring logs to Claude before proceeding to Phase D.
 **Acceptance:** See Part 11. Both boards must pass before this phase is complete.
 
 **D.1 — Cut over CAD ingest to per-candidate** (`src/detection_engine.cpp`, `src/main.cpp`)  
-`detectionEngineIngestCadSubGHz()` refreshes candidate fast evidence. Stop feeding global aggregate counters. `detectionEngineIngestCad24()` refreshes cad24 on existing candidates only (never creates).
+`detectionEngineIngestCadBandSummary()` refreshes candidate fast evidence.
+`detectionEngineIngestCad24BandSummary()` refreshes cad24 on existing
+candidates only (never creates). Aggregate CAD/FSK counters may remain wired
+to the legacy comparison scorer until Phase G, but they must not drive the
+real FSM or candidate scoring.
 
 **D.2 — Cut over sweep ingest to candidate confirmation** (`src/detection_engine.cpp`)  
 First corroborating sweep: `sweepSub.score = 5`, `sweepSub.ttlMs = TTL_SWEEP_SUB_MS`. Protocol match: `protoSub.score = 15`. Persistent sweep: upgrade score in-place.
 
 **D.3 — Replace `assessThreat()` with `chooseBestCandidate()`**  
-Remove legacy global scoring. Keep `lastFastScore`, `lastConfirmScore` in `SystemState` for display/logging.
+`chooseBestCandidate()` becomes the real threat decision path. Keep
+`lastFastScore`, `lastConfirmScore` for display/logging. Legacy global scoring
+may remain comparison-only for regression alarming until Phase G, but it must
+not commit `currentThreat` or emit real transitions.
 
 **D.4 — Run full validation suite** (see Part 11).
 
@@ -511,7 +533,10 @@ Remove legacy global scoring. Keep `lastFastScore`, `lastConfirmScore` in `Syste
 **Acceptance:** Cold boot x5 each board, zero false WARNING/CRITICAL in first 60 seconds.
 
 **E.1 — Apply readiness gates per Part 7**  
-Implement per-evidence `ready` flag logic. Remove any remaining global warmup cap references.
+Implement per-evidence `ready` flag logic. Remove any remaining global
+warmup-cap references from the candidate path. The legacy `assessThreat()`
+comparison path may retain private warmup housekeeping until it is removed in
+Phase G, but it must not influence candidate scoring or the real FSM.
 
 **E.2 — Verify Phase B.5 ambient tagging is working correctly**  
 By this phase, progressive ambient tagging (B.5) should have already eliminated the batch-reset problem. This phase verifies it holds under the candidate engine.

@@ -379,13 +379,14 @@ static ThreatDecision chooseBestCandidate(DetectionCandidate* pool, uint8_t coun
 
 // Public: main.cpp caches the full sub-GHz CadBandSummary here once per cycle
 // so the candidate engine can read the anchor + full counts. The existing
-// detectionEngineIngestCad() primitive-int path is unchanged.
+// detectionEngineIngestCad() aggregate-int path remains only for the legacy
+// comparison scorer behind [CAND-DELTA].
 void detectionEngineIngestCadBandSummary(const CadBandSummary& subGHz) {
     lastSubGHzSummary = subGHz;
     lastSubGHzSummaryValid = true;
 }
 
-// Phase C.2: 2.4 GHz CadBandSummary ingest — LR1121 only.
+// 2.4 GHz CadBandSummary ingest — LR1121 only, confirmer-only.
 void detectionEngineIngestCad24BandSummary(const CadBandSummary& band24) {
     lastBand24Summary = band24;
     lastBand24SummaryValid = true;
@@ -859,6 +860,12 @@ static ThreatLevel assessThreat(const IntegrityStatus& integrity) {
     // Phase D: lastDetectionMs is now set by detectionEngineAssess from the
     // candidate decision (not legacy desired).
 
+    // Phase E note: this warmup gate is part of the legacy assessThreat()
+    // comparison path only — it does NOT affect the candidate engine.
+    // Per Phase E spec, per-evidence readiness gates on the candidate path
+    // replace the global warmup cap. The legacy path is exempt from this
+    // requirement as it is comparison-only and will be removed in Phase G.
+    //
     // Post-warmup housekeeping: ONE-TIME timer/state reset when warmup ends.
     // Phase D Stabilization: the previous version also wiped tracked[],
     // tracked24[], protoTracked[], and band-energy history — but those arrays
@@ -1191,6 +1198,16 @@ static ThreatDecision evaluateCandidateEngine(const GpsData& gps,
 
         bool haveCad  = (s.confirmedCadCount > 0) || (s.strongPendingCad > 0);
         bool haveFsk  = (s.confirmedFskCount > 0);
+        // Phase E.1a: haveFhss MUST stay strict because fhssSub being live
+        // adds FAST_SCORE_DIVERSITY_BONUS=20 to fast score (the score=1
+        // passed to refreshEvidence is just an evidenceLive sentinel — the
+        // real scoring contribution is the bonus in computeFastScore()).
+        // Loosening to (diversityCount > 0) or (diversityCount >= 2) caused
+        // false ADVISORY/WARNING on cold-boot benches where 2-6 unique
+        // sub-GHz channels persist as ambient. Keeping the time-gated
+        // persistentDiversityCount path matches the original Phase E
+        // acceptance behavior. fhssCluster (div>=8 + fastConf>=1) provides
+        // the cycle-1 capable path for fast-FHSS; fhssSub stays strict.
         bool haveFhss = (s.persistentDiversityCount > 0) ||
                         (s.diversityVelocity >= DIVERSITY_VELOCITY_FHSS_MIN);
 
@@ -1410,10 +1427,15 @@ ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& int
     lastScore        = (int)decision.fastScore + (int)decision.confirmScore;
     if (decision.level >= THREAT_ADVISORY) lastDetectionMs = nowMs;
 
+    // ── Candidate FSM: fast-up / slow-down hysteresis (Phase D, preserved) ──
+    // DO NOT replace with currentThreat = decision.level (raw assignment).
+    // The one-step-per-COOLDOWN_MS decay is intentional — it smooths out
+    // per-cycle evidence churn and prevents buzzer flapping on intermittent
+    // FHSS signals. See Phase D stabilization commit aaaa6e9 for context.
+    //
     // Phase D Stabilization: fast-up / slow-down hysteresis on the candidate
     // FSM. Escalation is immediate, decay is gated by COOLDOWN_MS using the
     // dedicated candidateThreatEventMs timer (independent of legacy timing).
-    // Restores the smoothed decay behavior the raw assignment was missing.
     ThreatLevel prevThreat = currentThreat;
     ThreatLevel desired    = decision.level;
 

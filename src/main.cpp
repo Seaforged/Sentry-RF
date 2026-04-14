@@ -128,11 +128,12 @@ static void loRaScanTask(void* param) {
                                  cadFsk.persistentDiversityCount,
                                  cadFsk.diversityVelocity,
                                  cadFsk.sustainedCycles);
-        // Phase C: also feed the full sub-GHz CadBandSummary (anchor + counts)
-        // into the shadow candidate engine. Runs parallel to the legacy path.
+        // Feed the full sub-GHz CadBandSummary into the real candidate engine.
+        // The aggregate-int path above is retained only for the legacy
+        // comparison scorer that drives [CAND-DELTA].
         detectionEngineIngestCadBandSummary(cadFsk.subGHz);
 #ifdef BOARD_T3S3_LR1121
-        // Phase C.2: 2.4 GHz CadBandSummary as confirmer (LR1121 only).
+        // 2.4 GHz CadBandSummary is confirmer-only on LR1121.
         detectionEngineIngestCad24BandSummary(cadFsk.band24);
 #endif
 
