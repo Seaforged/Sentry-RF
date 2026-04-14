@@ -36,7 +36,30 @@ static const int   MAX_PROTO_TRACKED     = 14;      // max tracked protocol sign
 
 // ── Threat Timing ─────────────────────────────────────────────────────
 static const unsigned long COOLDOWN_MS   = 5000;    // ms before threat decays one level (was 15000)
-static const int RSSI_SWEEP_INTERVAL     = 3;       // run RSSI sweep every Nth CAD cycle
+
+// ── Scan Pacing (Phase F: wall-clock timers) ──────────────────────────
+// Replaces the cycle-count gates used pre-Phase-F. Each period must be
+// strictly greater than that board's short-cycle wall time for the
+// timer to actually skip cycles — otherwise the gate fires every
+// iteration and degrades into "no gate".
+//
+// LR24_CAD_PERIOD_MS is only consumed inside #ifdef BOARD_T3S3_LR1121
+// blocks in cad_scanner.cpp, so it does NOT need a per-board branch
+// here. SX1262 targets never reach the 2.4 GHz code path.
+#define LR24_CAD_PERIOD_MS       6000
+
+// RSSI_SWEEP_INTERVAL_MS is consumed in shared loRaScanTask code in
+// main.cpp and must be tuned per board. The LR1121 has ~2.0 s short
+// cycles, so 8000 ms fires the sweep every ~4th cycle. The SX1262
+// boards (t3s3, heltec_v3) have ~1.0 s short cycles, so 3000 ms fires
+// the sweep every ~3rd cycle — matching the old cycleCount % 3 cadence
+// and preserving sweep-based corroboration/persistence latency on
+// non-LR1121 targets.
+#ifdef BOARD_T3S3_LR1121
+#define RSSI_SWEEP_INTERVAL_MS   8000
+#else
+#define RSSI_SWEEP_INTERVAL_MS   3000
+#endif
 
 // ── Rapid-Clear Path ──────────────────────────────────────────────────
 static const unsigned long RAPID_CLEAR_CLEAN_MS = 5000;  // ms of continuous clean state to force CLEAR

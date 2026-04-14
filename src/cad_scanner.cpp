@@ -888,6 +888,16 @@ static uint32_t rot24SF6 = 0;
 static uint32_t rot24SF7 = 0;
 static uint32_t rot24SF8 = 0;
 
+// Phase F (revised): wall-clock gate for the LR1121 2.4 GHz BROAD scan.
+// The re-check of already-active 2.4 GHz taps still runs every cycle
+// (it's cheap). Only the SF6/SF7/SF8 broad-channel rotation is gated.
+// No end-of-cycle radio restoration is performed — the previous Phase F
+// attempt parked the radio at sub-GHz (setFrequency(860)+setOutputPower)
+// which forced a large cross-band image calibration and ~doubled the
+// sub-GHz CAD time on every cycle. RX-only CAD doesn't need the PA-mux
+// latch; the next cycle's ensureLoRa_LR() reconfigures mode cleanly.
+static uint32_t nextLr24CadMs = 0;
+
 CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult* rssi) {
     CadFskResult result = {};
     latestSweep = rssi;
@@ -1087,43 +1097,60 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
         }
     }
 
-    // Broad 2.4 GHz scan — SF6/SF7/SF8 rotating, every 3rd cycle only.
-    if (cycleNum % 3 == 0) {
-    SFScan sf24Scans[] = {
-        { 6, CAD_24_SF6, ELRS_24_CHANNELS, &rot24SF6, elrs24Freq },
-        { 7, CAD_24_SF7, ELRS_24_CHANNELS, &rot24SF7, elrs24Freq },
-        { 8, CAD_24_SF8, ELRS_24_CHANNELS, &rot24SF8, elrs24Freq },
-    };
+    // Broad 2.4 GHz scan — SF6/SF7/SF8 rotating. Phase F (revised):
+    // gated on a wall-clock timer instead of cycleNum % 3. cycleNum is
+    // no longer consulted here; the (void)cycleNum cast below silences
+    // the unused-parameter warning without changing the shared signature.
+    // LR24_CAD_PERIOD_MS must be strictly greater than the short-cycle
+    // wall time (~2.0s) for this gate to actually skip cycles.
+    (void)cycleNum;
+    bool run24BroadScan = ((int32_t)(millis() - nextLr24CadMs) >= 0);
+    if (run24BroadScan) {
+        nextLr24CadMs = millis() + LR24_CAD_PERIOD_MS;
 
-    for (int s = 0; s < 3; s++) {
-        SFScan& sc = sf24Scans[s];
-        radio.setSpreadingFactor(sc.sf);
-        ChannelScanConfig_t cfg24b = buildCadConfigLR(sc.sf);
+        SFScan sf24Scans[] = {
+            { 6, CAD_24_SF6, ELRS_24_CHANNELS, &rot24SF6, elrs24Freq },
+            { 7, CAD_24_SF7, ELRS_24_CHANNELS, &rot24SF7, elrs24Freq },
+            { 8, CAD_24_SF8, ELRS_24_CHANNELS, &rot24SF8, elrs24Freq },
+        };
 
-        int stride = sc.totalCh / sc.chCount;
-        if (stride < 1) stride = 1;
-        int offset = (*sc.rot) % stride;
-        (*sc.rot)++;
+        for (int s = 0; s < 3; s++) {
+            SFScan& sc = sf24Scans[s];
+            radio.setSpreadingFactor(sc.sf);
+            ChannelScanConfig_t cfg24b = buildCadConfigLR(sc.sf);
 
-        for (int i = 0; i < sc.chCount; i++) {
-            int ch = (offset + i * stride) % sc.totalCh;
-            float freq = sc.fn(ch);
-            radio.setFrequency(freq);
+            int stride = sc.totalCh / sc.chCount;
+            if (stride < 1) stride = 1;
+            int offset = (*sc.rot) % stride;
+            (*sc.rot)++;
 
-            int16_t cadResult = radio.scanChannel(cfg24b);
-            countCadProbe(cadResult);
-            if (cadResult == RADIOLIB_LORA_DETECTED) {
-                CadTap* existing = findTap(band24Tracker, freq, sc.sf);
-                if (!existing) addTap(band24Tracker, freq, sc.sf, BAND_2G4);
-                if (existing && existing->consecutiveHits >= 2)
-                    recordDiversityHit(band24Tracker, freq, sc.sf);
-                fhssRecordHit24(freq, sc.sf);
+            for (int i = 0; i < sc.chCount; i++) {
+                int ch = (offset + i * stride) % sc.totalCh;
+                float freq = sc.fn(ch);
+                radio.setFrequency(freq);
+
+                int16_t cadResult = radio.scanChannel(cfg24b);
+                countCadProbe(cadResult);
+                if (cadResult == RADIOLIB_LORA_DETECTED) {
+                    CadTap* existing = findTap(band24Tracker, freq, sc.sf);
+                    if (!existing) addTap(band24Tracker, freq, sc.sf, BAND_2G4);
+                    if (existing && existing->consecutiveHits >= 2)
+                        recordDiversityHit(band24Tracker, freq, sc.sf);
+                    fhssRecordHit24(freq, sc.sf);
+                }
             }
         }
     }
-    }
 
-    // Flush 2.4 GHz FHSS frequency-spread tracker.
+    // Phase F (revised): NO end-of-2.4-GHz-block radio restoration. The
+    // previous attempt parked the radio at setFrequency(860)+setOutputPower
+    // which triggered a cross-band image calibration every cycle and
+    // doubled sub-GHz CAD phase time. RX-only CAD doesn't need a PA-mux
+    // latch — ensureLoRa_LR() at the top of the next cycle reconfigures
+    // packet type and bandwidth from whatever state we left behind.
+
+    // Flush 2.4 GHz FHSS frequency-spread tracker (time-based, safe to
+    // call every cycle regardless of whether the broad scan fired).
     fhssFlushSpread24();
 
     // ── PHASE 4: Switch back to GFSK for RSSI sweep ──────────────────

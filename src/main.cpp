@@ -98,7 +98,7 @@ static const char* threatLevelStr(ThreatLevel t) {
     }
 }
 
-// RSSI_SWEEP_INTERVAL from sentry_config.h
+// RSSI_SWEEP_INTERVAL_MS from sentry_config.h (Phase F wall-clock pacing)
 #include "sentry_config.h"
 
 // Core 1 — LoRa SPI is only touched here, no mutex needed for the radio
@@ -107,14 +107,16 @@ static void loRaScanTask(void* param) {
     GpsData snapGps = {};
     IntegrityStatus snapIntegrity = {};
     uint32_t sweepNum = 0;
-    uint32_t cycleCount = 0;
+    // Phase F (revised): wall-clock pacing for the sub-GHz RSSI sweep.
+    // Seeded to 0 so the first loop iteration always sweeps (matches the
+    // warm-start intent of the previous cycleCount-based gate).
+    uint32_t nextSubGHzSweepMs = 0;
 #ifdef BOARD_T3S3_LR1121
     ScanResult24 local24 = {};
 #endif
 
     // ── Main scan loop ────────────────────────────────────────────────────
     for (;;) {
-        cycleCount++;
         unsigned long cycleStart = millis();
 
         // ── PHASE 1: CAD scan FIRST (~1000ms) ────────────────────────
@@ -159,9 +161,14 @@ static void loRaScanTask(void* param) {
             xSemaphoreGive(stateMutex);
         }
 
-        // ── PHASE 2: RSSI sweep every Nth cycle (~2.2s) ─────────────
+        // ── PHASE 2: RSSI sweep on its own wall-clock cadence ──────
+        // Phase F (revised): sweep fires when nextSubGHzSweepMs has been
+        // crossed, independent of CAD cycle duration. The period
+        // (RSSI_SWEEP_INTERVAL_MS) must exceed the short-cycle wall
+        // time so the timer actually skips cycles.
         bool didRssi = false;
-        if (cycleCount % RSSI_SWEEP_INTERVAL == 0) {
+        if ((int32_t)(millis() - nextSubGHzSweepMs) >= 0) {
+            nextSubGHzSweepMs = millis() + RSSI_SWEEP_INTERVAL_MS;
             unsigned long sweepStart = millis();
             scannerSweep(radio, localResult);
 
