@@ -14,21 +14,22 @@ void detectionEngineInit();
 // wrapper for backward compatibility, but new code should call these three
 // functions directly so CAD/sweep ingest is decoupled from threat assessment.
 
-// Ingest CAD/FSK results — called every cycle from loRaScanTask after CAD scan.
-// Updates cached counts used by detectionEngineAssess().
+// Ingest aggregate CAD/FSK results — retained for the legacy comparison scorer
+// that powers [CAND-DELTA]. The real candidate path ingests CadBandSummary
+// separately via detectionEngineIngestCadBandSummary().
 void detectionEngineIngestCad(int cadCount, int fskCount, int strongPendingCad,
                               int activeTaps, int diversityCount,
                               int persistentDiversity, int diversityVelocity,
                               int sustainedCycles);
 
-// Phase C: Ingest full sub-GHz CadBandSummary (anchor + counts + timestamps)
-// into the shadow candidate engine. Called from loRaScanTask alongside the
-// legacy detectionEngineIngestCad() path. Safe no-op if summary is empty.
+// Ingest full sub-GHz CadBandSummary (anchor + counts + timestamps) into the
+// real candidate engine. Called from loRaScanTask alongside the legacy
+// comparison path. Safe no-op if summary is empty.
 void detectionEngineIngestCadBandSummary(const struct CadBandSummary& subGHz);
 
-// Phase C.2: Ingest full 2.4 GHz CadBandSummary (LR1121 only). The shadow
-// candidate engine uses this strictly as a confirmer — it never seeds a new
-// candidate from 2.4 GHz evidence alone.
+// Ingest full 2.4 GHz CadBandSummary (LR1121 only). The candidate engine uses
+// this strictly as a confirmer — it never seeds a new candidate from 2.4 GHz
+// evidence alone.
 void detectionEngineIngestCad24BandSummary(const struct CadBandSummary& band24);
 
 // Ingest fresh sweep data — called only on RSSI sweep cycles.
@@ -38,7 +39,9 @@ void detectionEngineIngestCad24BandSummary(const struct CadBandSummary& band24);
 void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan24 = nullptr);
 
 // Run threat assessment — called every cycle. Reads cached state from both
-// ingest functions and runs the assessThreat policy + FSM.
+// ingest functions, evaluates the candidate engine, and applies the real FSM.
+// The legacy assessThreat() path still runs for comparison-only [CAND-DELTA]
+// logging.
 ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& integrity);
 
 // Feed CAD and FSK detection counts before calling detectionEngineUpdate().
