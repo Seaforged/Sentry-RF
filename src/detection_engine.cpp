@@ -182,8 +182,10 @@ static void refreshEvidence(EvidenceTerm& e, uint8_t score, uint32_t ttlMs,
 // (CAD/FSK/FHSS/cluster) evidence? Used as one of the three ways to satisfy
 // the sweepSub readiness gate (see Part 7).
 static bool candHasLiveFastEvidence(const DetectionCandidate& c, uint32_t nowMs);
+static uint8_t candidateLocalDiversityCount(const DetectionCandidate& c);
+static uint8_t candidateLocalFastConfirmedCadCount(const DetectionCandidate& c, uint32_t nowMs);
 static bool candidateHasValidatedClusterEvidence(const DetectionCandidate& c, uint32_t nowMs);
-static bool candidateHasStrongSubGHzCorroboration(const DetectionCandidate& c, uint32_t nowMs);
+static uint8_t candidateCorroboratorCount(const DetectionCandidate& c, uint32_t nowMs);
 static bool candidateHasProbationReleaseEvidence(const DetectionCandidate& c, uint32_t nowMs);
 static bool candidateNeedsInfraProbation(const DetectionCandidate& c, uint32_t nowMs);
 static bool candidateCanAccept24Confirmer(const DetectionCandidate& c, uint32_t nowMs);
@@ -221,28 +223,51 @@ static float candidateFreqSpanMhz(const DetectionCandidate& c) {
     return (span > 0.0f) ? span : 0.0f;
 }
 
-// fhssCluster is sourced from the aggregate sub-GHz band summary. Before it
-// can influence a single candidate, require that candidate's own observed
-// anchor spread to widen beyond the narrowband / infrastructure-like range.
-static bool candidateHasValidatedClusterEvidence(const DetectionCandidate& c, uint32_t nowMs) {
-    return evidenceLive(c.fhssCluster, nowMs) &&
-           candidateFreqSpanMhz(c) > CAND_INFRA_NARROW_SPAN_MHZ;
+// Convert the candidate's own observed anchor spread into a conservative
+// diversity-slot count. This keeps fhssCluster candidate-local instead of
+// letting a fixed emitter borrow unrelated bench diversity from the global
+// sub-GHz summary.
+static uint8_t candidateLocalDiversityCount(const DetectionCandidate& c) {
+    float span = candidateFreqSpanMhz(c);
+    if (span <= 0.0f) return 1;
+    uint16_t slots = (uint16_t)floorf(span / CAND_ASSOC_SUB_MHZ) + 1;
+    return (slots > 255) ? (uint8_t)255 : (uint8_t)slots;
 }
 
-// Release/attach gate for broad-spectrum sub-GHz corroboration. A validated
-// cluster plus elevated band energy is strong enough to look like real FHSS;
-// weaker single-source corroborators (sweepSub, protoSub) still add confirm
-// score but do not release probation or unlock cross-band attachment.
-static bool candidateHasStrongSubGHzCorroboration(const DetectionCandidate& c, uint32_t nowMs) {
-    return candidateHasValidatedClusterEvidence(c, nowMs) &&
-           evidenceLive(c.bandEnergy, nowMs);
+// Derive the candidate-local fast-confirmed CAD count from the evidence
+// already attached to this candidate. cadConfirmed contributes 10 points per
+// tap, cadPending contributes 5 points per strong-pending tap.
+static uint8_t candidateLocalFastConfirmedCadCount(const DetectionCandidate& c, uint32_t nowMs) {
+    uint8_t confirmed = evidenceScore(c.cadConfirmed, nowMs) / FAST_SCORE_CAD_PER_TAP;
+    uint8_t pending = evidenceScore(c.cadPending, nowMs) / (FAST_SCORE_CAD_PER_TAP / 2);
+    uint16_t total = (uint16_t)confirmed + (uint16_t)pending;
+    return (total > 255) ? (uint8_t)255 : (uint8_t)total;
+}
+
+// fhssCluster is candidate-local in Phase E.1a: the diversity and fast-
+// confirmed CAD used by this gate must come from the candidate's own anchor
+// neighborhood, not the aggregate sub-GHz bench summary.
+static bool candidateHasValidatedClusterEvidence(const DetectionCandidate& c, uint32_t nowMs) {
+    return evidenceLive(c.fhssCluster, nowMs) &&
+           candidateLocalDiversityCount(c) >= 8 &&
+           candidateLocalFastConfirmedCadCount(c, nowMs) >= 1;
+}
+
+static uint8_t candidateCorroboratorCount(const DetectionCandidate& c, uint32_t nowMs) {
+    uint8_t count = 0;
+    if (candidateHasValidatedClusterEvidence(c, nowMs)) count++;
+    if (evidenceLive(c.protoSub, nowMs)) count++;
+    if (evidenceLive(c.bandEnergy, nowMs)) count++;
+    if (evidenceLive(c.sweepSub, nowMs)) count++;
+    if (evidenceLive(c.cad24, nowMs)) count++;
+    return count;
 }
 
 static bool candidateHasProbationReleaseEvidence(const DetectionCandidate& c, uint32_t nowMs) {
-    return evidenceLive(c.fskConfirmed, nowMs) ||
-           evidenceLive(c.rid,          nowMs) ||
-           evidenceLive(c.gnss,         nowMs) ||
-           candidateHasStrongSubGHzCorroboration(c, nowMs);
+    if (evidenceLive(c.rid, nowMs) || evidenceLive(c.gnss, nowMs)) {
+        return true;
+    }
+    return candidateCorroboratorCount(c, nowMs) >= 2;
 }
 
 static bool candidateNeedsInfraProbation(const DetectionCandidate& c, uint32_t nowMs) {
@@ -253,7 +278,12 @@ static bool candidateNeedsInfraProbation(const DetectionCandidate& c, uint32_t n
 }
 
 static bool candidateCanAccept24Confirmer(const DetectionCandidate& c, uint32_t nowMs) {
-    return candidateHasStrongSubGHzCorroboration(c, nowMs);
+    // sweepSub intentionally excluded here: a post-warmup sweep peak alone is
+    // too easy to earn on persistent bench infrastructure. Cross-band attach
+    // requires stronger corroboration.
+    return candidateHasValidatedClusterEvidence(c, nowMs) ||
+           evidenceLive(c.protoSub, nowMs) ||
+           evidenceLive(c.bandEnergy, nowMs);
 }
 
 static void ageOutCandidates(DetectionCandidate* pool, uint8_t count, uint32_t nowMs) {
@@ -1345,23 +1375,13 @@ static ThreatDecision evaluateCandidateEngine(const GpsData& gps,
                 refreshEvidence(c->fhssSub, 1, TTL_FHSS_SUB_MS, nowMs, /*ready=*/true);
             }
 
-            // Phase E cluster evidence — closes the LR1121 fast-FHSS gap
-            // where consecutiveHits>=3 is rarely achieved on a single channel
-            // due to long scan cycles. Gated on:
-            //   diversityCount >= 8     (real FHSS shows 20+; bench infra <8)
-            //   fastConfirmedCadCount >= 1   (at least one tap at hits>=2)
-            //
-            // Empirical tuning: COM9 cold-boot bench produced div<=6 with
-            // fastConf=1 from infrastructure pickups, which fired a false
-            // ADVISORY at div>=3. Bumping to div>=8 and requiring
-            // fastConfirmedCadCount (no `|| confirmedCadCount` fallback)
-            // eliminates the bench false fire while preserving the LR1121
-            // fast-FHSS path (JJ produces div>=20).
-            //
-            // `s` is lastSubGHzSummary — sub-GHz band only — so chronic
-            // 2.4 GHz noise cannot trigger this gate.
-            bool haveCluster = (s.diversityCount >= 8) &&
-                               (s.fastConfirmedCadCount >= 1);
+            // Phase E.1a cluster evidence — candidate-local, not bench-global.
+            // A fixed emitter must not be allowed to borrow unrelated
+            // sub-GHz bench diversity from lastSubGHzSummary. Derive the gate
+            // from this candidate's own anchor spread plus its own attached
+            // fast-confirmed CAD evidence.
+            bool haveCluster = (candidateLocalDiversityCount(*c) >= 8) &&
+                               (candidateLocalFastConfirmedCadCount(*c, nowMs) >= 1);
             if (haveCluster) {
                 refreshEvidence(c->fhssCluster, FAST_SCORE_FHSS_CLUSTER,
                                 TTL_FHSS_CLUSTER_MS, nowMs, /*ready=*/true);
