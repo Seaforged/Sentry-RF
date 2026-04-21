@@ -40,7 +40,50 @@ static TaskHandle_t hLoRaTask    = nullptr;
 static TaskHandle_t hGPSTask     = nullptr;
 static TaskHandle_t hDisplayTask = nullptr;
 static TaskHandle_t hAlertTask   = nullptr;
-static TaskHandle_t hWiFiTask    = nullptr;
+// hWiFiTask lives in wifi_scanner.cpp (needs to be externally resumable).
+
+// ── Phase H: Operational mode ──────────────────────────────────────────
+// Default boot is STANDARD — behavior identical to pre-Phase-H. Reads
+// and writes go through modeGet()/modeSet() which take stateMutex, so
+// this global should never be read directly outside this file.
+static volatile OperatingMode currentMode = MODE_STANDARD;
+
+extern "C" OperatingMode modeGet() {
+    OperatingMode m = MODE_STANDARD;
+    if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        m = currentMode;
+        xSemaphoreGive(stateMutex);
+    } else {
+        // Pre-mutex path (boot) — direct read is fine, only one core is live.
+        m = currentMode;
+    }
+    return m;
+}
+
+extern "C" void modeSet(OperatingMode m) {
+    if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        currentMode = m;
+        xSemaphoreGive(stateMutex);
+    } else {
+        currentMode = m;
+    }
+}
+
+extern "C" const char* modeShortLabel(OperatingMode m) {
+    switch (m) {
+        case MODE_COVERT:     return "COV";
+        case MODE_HIGH_ALERT: return "HI-ALT";
+        default:              return "STD";
+    }
+}
+
+extern "C" const char* modeLongLabel(OperatingMode m) {
+    switch (m) {
+        case MODE_COVERT:     return "COVERT";
+        case MODE_HIGH_ALERT: return "HIGH_ALERT";
+        default:              return "STANDARD";
+    }
+}
 
 // ── Hardware init (runs once in setup on Core 1) ────────────────────────────
 
@@ -167,6 +210,16 @@ static void loRaScanTask(void* param) {
         // (RSSI_SWEEP_INTERVAL_MS) must exceed the long-cycle wall time
         // (cycle-with-sweep) on every board so the timer actually skips
         // iterations instead of re-firing immediately on the next pass.
+        //
+        // Phase H: in HIGH_ALERT the period extends to
+        // HIGH_ALERT_RSSI_INTERVAL_MS so CAD gets the scan budget. The
+        // sweep still runs occasionally as a sanity check — candidate
+        // engine keeps working either way since CAD produces its own
+        // evidence.
+        OperatingMode mode = modeGet();
+        uint32_t rssiPeriodMs = (mode == MODE_HIGH_ALERT)
+                              ? HIGH_ALERT_RSSI_INTERVAL_MS
+                              : RSSI_SWEEP_INTERVAL_MS;
         bool didRssi = false;
         if ((int32_t)(millis() - nextSubGHzSweepMs) >= 0) {
             unsigned long sweepStart = millis();
@@ -209,7 +262,7 @@ static void loRaScanTask(void* param) {
             // from sweep-end to next-fire-start. Advancing before the sweep
             // would make the next deadline expire while the current sweep
             // is still running, causing the gate to fire on every iteration.
-            nextSubGHzSweepMs = millis() + RSSI_SWEEP_INTERVAL_MS;
+            nextSubGHzSweepMs = millis() + rssiPeriodMs;
         }
 
         // Log to SD/SPIFFS — zero-init prevents garbage if mutex path is skipped.
@@ -400,6 +453,50 @@ static const ScreenFn screens[] = {
 #endif
 };
 
+// Phase H: apply a mode change. Called by the button FSM on multi-press.
+// Handles the side effects that a raw modeSet() wouldn't: waking the WiFi
+// task on exit from COVERT, turning the OLED back on, announcing to
+// serial + SD. Called from displayTask only — safe to touch oled/screen
+// state directly here.
+static void applyModeChange(OperatingMode newMode, Adafruit_SSD1306& disp) {
+    OperatingMode prev = modeGet();
+    if (prev == newMode) return;
+    modeSet(newMode);
+
+    // Format "HH:MM:SS" uptime once so serial + SD agree.
+    char uptime[9];
+    unsigned long sec = millis() / 1000;
+    snprintf(uptime, sizeof(uptime), "%02lu:%02lu:%02lu",
+             sec / 3600, (sec % 3600) / 60, sec % 60);
+
+    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        Serial.printf("[MODE] Switched to %s at %s\n",
+                      modeLongLabel(newMode), uptime);
+        xSemaphoreGive(serialMutex);
+    }
+    loggerLogModeChange(modeLongLabel(newMode), uptime);
+
+    // OLED: leaving COVERT re-powers the panel; entering COVERT blanks
+    // and powers it off. ssd1306_command isn't exposed so we drive the
+    // I2C display-off via the Adafruit API's dim()/display() primitives:
+    // clearDisplay() + display() leaves the panel on but dark. That's
+    // close enough to "off" for a passive detector in the field — the
+    // backlight is the pixel matrix itself, so a dark screen emits
+    // near-zero light. The next render cycle in non-COVERT repaints.
+    if (newMode == MODE_COVERT) {
+        disp.clearDisplay();
+        disp.display();
+    }
+
+    // WiFi task: resuming on exit from COVERT — it reinits WiFi itself
+    // at the top of its loop. Entering COVERT is handled by the task
+    // noticing modeGet() == COVERT on its next iteration and then calling
+    // vTaskSuspend(NULL) on itself.
+    if (prev == MODE_COVERT && newMode != MODE_COVERT && hWiFiTask != nullptr) {
+        vTaskResume(hWiFiTask);
+    }
+}
+
 // Core 1 — OLED I2C and BOOT button only touched here
 static void displayTask(void* param) {
     static SystemState local;
@@ -410,40 +507,94 @@ static void displayTask(void* param) {
     bool buttonWasDown = false;
     unsigned long buttonDownMs = 0;
 
+    // Phase H: multi-press FSM state.
+    //   Tap (100-999 ms held) increments pressCount.
+    //   After MULTI_PRESS_QUIET_MS of quiet following the last release,
+    //   fire action based on count: 1=screen cycle, 2=HIGH_ALERT,
+    //   3+=COVERT. Holds ≥1s retain their existing semantics
+    //   (acknowledge / mute) and reset the counter.
+    static const unsigned long MULTI_PRESS_QUIET_MS = 800;
+    int pressCount = 0;
+    unsigned long lastReleaseMs = 0;
+    OperatingMode prevMode = modeGet();
+
     for (;;) {
+        // Detect mode changes driven from outside this task (none today,
+        // but future hook points) — would re-render on transition.
+        OperatingMode mode = modeGet();
+        if (mode != prevMode) {
+            lastRenderedScreen = -1;
+            prevMode = mode;
+        }
+
         // ── Button input (polled at ~50ms) ─────────────────────
         bool buttonDown = (digitalRead(PIN_BOOT) == LOW);
+        unsigned long nowMs = millis();
 
         if (buttonDown) {
             if (!buttonWasDown) {
-                buttonDownMs = millis();
+                buttonDownMs = nowMs;
                 buttonWasDown = true;
             }
         } else {
             if (buttonWasDown) {
-                unsigned long held = millis() - buttonDownMs;
+                unsigned long held = nowMs - buttonDownMs;
                 if (held >= 3000) {
+                    // Long press — mute. Clears any pending multi-press
+                    // so a tap-tap-hold sequence doesn't also toggle
+                    // HIGH_ALERT after the mute fires.
                     alertToggleMute();
+                    pressCount = 0;
                 } else if (held >= 1000) {
+                    // 1-2.999 s hold — acknowledge current alert.
                     alertAcknowledge();
+                    pressCount = 0;
                 } else if (held >= 100) {
-                    currentScreen = (currentScreen + 1) % NUM_SCREENS;
-                    lastAdvanceMs = millis();
-                    lastRenderedScreen = -1;  // force re-render
+                    // Tap — add to multi-press counter, fire after quiet.
+                    pressCount++;
+                    lastReleaseMs = nowMs;
                 }
+                // held < 100 ms: debounce, ignore.
             }
             buttonWasDown = false;
         }
 
-        // ── Auto-rotate every 5 seconds ────────────────────────
-        if (millis() - lastAdvanceMs > 5000) {
+        // Fire the multi-press action once the quiet window has elapsed
+        // and the button is still released. This is what delays a single
+        // tap's screen cycle by MULTI_PRESS_QUIET_MS — the cost of
+        // disambiguating 1 vs 2 vs 3 taps without dedicated IRQ timing.
+        if (pressCount > 0 && !buttonDown &&
+            (nowMs - lastReleaseMs) >= MULTI_PRESS_QUIET_MS) {
+            if (pressCount == 1) {
+                // Single tap — cycle screen, but not in COVERT (display off).
+                if (mode != MODE_COVERT) {
+                    currentScreen = (currentScreen + 1) % NUM_SCREENS;
+                    lastAdvanceMs = nowMs;
+                    lastRenderedScreen = -1;
+                }
+            } else if (pressCount == 2) {
+                // Double tap — toggle HIGH_ALERT.
+                applyModeChange(
+                    (mode == MODE_HIGH_ALERT) ? MODE_STANDARD : MODE_HIGH_ALERT,
+                    oled);
+            } else {
+                // Triple+ tap — toggle COVERT.
+                applyModeChange(
+                    (mode == MODE_COVERT) ? MODE_STANDARD : MODE_COVERT,
+                    oled);
+            }
+            pressCount = 0;
+        }
+
+        // ── Auto-rotate every 5 seconds (not in COVERT) ────────
+        if (mode != MODE_COVERT && millis() - lastAdvanceMs > 5000) {
             currentScreen = (currentScreen + 1) % NUM_SCREENS;
             lastAdvanceMs = millis();
             lastRenderedScreen = -1;  // force re-render
         }
 
         // ── Render at 2 Hz (every 500ms) ───────────────────────
-        if (millis() - lastRenderMs >= 500) {
+        if (mode != MODE_COVERT && millis() - lastRenderMs >= 500) {
             lastRenderMs = millis();
 
             // Battery voltage

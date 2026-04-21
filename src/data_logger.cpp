@@ -134,6 +134,15 @@ void loggerFlush() {
     if (jsonlFile) jsonlFile.flush();
 }
 
+void loggerLogModeChange(const char* modeLabel, const char* uptimeHMS) {
+    if (jsonlFile) {
+        jsonlFile.printf("{\"t\":%lu,\"event\":\"mode_change\","
+                         "\"mode\":\"%s\",\"uptime\":\"%s\"}\n",
+                         millis(), modeLabel, uptimeHMS);
+        jsonlFile.flush();
+    }
+}
+
 #endif // BOARD_T3S3
 
 // ── Heltec V3: SPIFFS logging ──────────────────────────────────────────────
@@ -196,6 +205,17 @@ void loggerWrite(const SystemState& state, uint32_t sweepNum) {
 
 void loggerFlush() {
     if (logFile) logFile.flush();
+}
+
+void loggerLogModeChange(const char* modeLabel, const char* uptimeHMS) {
+    // Heltec V3 uses SPIFFS CSV only (no JSONL sibling), so we inline
+    // the mode change as a CSV comment line. Humans skim the log; the
+    // "# mode_change," prefix makes it grep-friendly.
+    if (logFile) {
+        logFile.printf("# mode_change,%lu,%s,%s\n",
+                       millis(), modeLabel, uptimeHMS);
+        logFile.flush();
+    }
 }
 
 #endif // BOARD_HELTEC_V3

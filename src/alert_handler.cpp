@@ -50,6 +50,13 @@ static unsigned long ledLastToggleMs = 0;
 static bool ledState = false;
 
 static void updateLED(ThreatLevel level, bool acknowledged) {
+    // Phase H: COVERT suppresses the LED entirely — zero emission.
+    if (modeGet() == MODE_COVERT) {
+        digitalWrite(PIN_LED, LOW);
+        ledState = false;
+        return;
+    }
+
     if (acknowledged || level == THREAT_CLEAR) {
         digitalWrite(PIN_LED, LOW);
         ledState = false;
@@ -197,12 +204,16 @@ void alertTask(void* param) {
                 xSemaphoreGive(serialMutex);
             }
 
+            // Phase H: COVERT suppresses all audible output.
+            bool covert = (modeGet() == MODE_COVERT);
+            bool highAlert = (modeGet() == MODE_HIGH_ALERT);
+
             if (newLevel > _lastThreat) {
                 // ── ESCALATION ──
                 _isAcknowledged = false;
                 _lastEscalationMs = millis();
 
-                if (newLevel >= THREAT_WARNING) {
+                if (!covert && newLevel >= THREAT_WARNING) {
                     TonePatternType pat = selectPattern(event.source, newLevel);
                     buzzerPlayPattern(pat);
                 }
@@ -217,8 +228,20 @@ void alertTask(void* param) {
                 _lastThreat = newLevel;
 
             } else if (newLevel == _lastThreat && !_isAcknowledged) {
-                // ── SAME LEVEL, NOT ACK'd — reminder beep after 30s ──
-                if (millis() - _lastEscalationMs > REMINDER_INTERVAL && !buzzerIsPlaying()) {
+                // ── SAME LEVEL, NOT ACK'd ──
+                // Phase H HIGH_ALERT: no debounce — fire the full pattern
+                // on every incoming WARNING/CRITICAL so the operator
+                // hears sustained signal immediately rather than after
+                // REMINDER_INTERVAL. COVERT still suppresses everything.
+                if (covert) {
+                    // no-op
+                } else if (highAlert && newLevel >= THREAT_WARNING &&
+                           !buzzerIsPlaying()) {
+                    TonePatternType pat = selectPattern(event.source, newLevel);
+                    buzzerPlayPattern(pat);
+                    _lastEscalationMs = millis();
+                } else if (millis() - _lastEscalationMs > REMINDER_INTERVAL &&
+                           !buzzerIsPlaying()) {
                     if (newLevel >= THREAT_WARNING) {
                         buzzerPlayPattern(TONE_RF_ADVISORY);  // soft reminder
                     }
@@ -228,7 +251,7 @@ void alertTask(void* param) {
             } else if (newLevel < _lastThreat) {
                 // ── DE-ESCALATION ──
                 if (newLevel == THREAT_CLEAR) {
-                    buzzerPlayPattern(TONE_ALL_CLEAR);
+                    if (!covert) buzzerPlayPattern(TONE_ALL_CLEAR);
                     _isAcknowledged = false;
 
                     if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {

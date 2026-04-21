@@ -1,5 +1,6 @@
 #include "display.h"
 #include "board_config.h"
+#include "sentry_config.h"
 #include "alert_handler.h"
 #include "buzzer_manager.h"
 #include "cad_scanner.h"
@@ -292,9 +293,18 @@ void screenDashboard(Adafruit_SSD1306& disp, const SystemState& state, int page)
     disp.setTextSize(1);
     disp.setTextColor(SSD1306_WHITE);
 
-    // Line 0: SENTRY-RF + threat level (right-aligned, inverted if WARNING+)
+    // Line 0: banner + mode tag + threat level (right-aligned, inverted
+    // if WARNING+). STANDARD keeps the original "SENTRY-RF" banner;
+    // COVERT/HIGH_ALERT drop the banner and show the bracketed mode
+    // label instead so the right-aligned threat badge (up to 8 chars
+    // for "CRITICAL") never collides at 128-pixel width.
     disp.setCursor(0, 0);
-    disp.print("SENTRY-RF");
+    OperatingMode m = modeGet();
+    if (m == MODE_STANDARD) {
+        disp.print("SENTRY-RF");
+    } else {
+        disp.printf("[%s]", modeShortLabel(m));
+    }
     const char* tStr = threatStr(state.threatLevel);
     int tWidth = strlen(tStr) * 6;
     if (state.threatLevel >= THREAT_WARNING) {

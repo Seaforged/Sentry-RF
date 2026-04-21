@@ -1,5 +1,6 @@
 #include "wifi_scanner.h"
 #include "board_config.h"
+#include "sentry_config.h"
 #include <Arduino.h>
 #include <esp_wifi.h>
 #include <string.h>
@@ -20,6 +21,10 @@ struct CapturedFrame {
 
 static QueueHandle_t wifiPacketQueue = nullptr;
 static const int PACKET_QUEUE_DEPTH = 20;
+
+// Task handle — set by main.cpp at task creation, declared extern in
+// wifi_scanner.h so displayTask can vTaskResume() us on exit from COVERT.
+TaskHandle_t hWiFiTask = nullptr;
 
 // Per-channel frame counters for Dashboard mini chart. Incremented from the
 // ISR callback on every captured management frame; snapshotted into
@@ -106,6 +111,18 @@ void wifiScannerStop() {
     Serial.println("[WIFI] Promiscuous scanner stopped");
 }
 
+// Full teardown — used by COVERT mode to eliminate WiFi RF emissions.
+// Order matters: promiscuous off → stop driver → deinit. Calling
+// esp_wifi_deinit() while the driver is still running returns
+// ESP_ERR_WIFI_NOT_STOPPED on ESP-IDF 4.x.
+void wifiScannerDeinit() {
+    esp_wifi_set_promiscuous(false);
+    esp_err_t stopErr = esp_wifi_stop();
+    esp_err_t deinitErr = esp_wifi_deinit();
+    Serial.printf("[WIFI] Deinit — stop:0x%x deinit:0x%x\n",
+                  (unsigned)stopErr, (unsigned)deinitErr);
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 static bool matchOUI(const uint8_t* mac, const uint8_t* oui) {
@@ -160,6 +177,28 @@ void wifiScanTask(void* param) {
     static const unsigned long HOP_INTERVAL_MS = 100;
 
     for (;;) {
+        // Phase H: mode gating. On entering COVERT we tear down WiFi and
+        // self-suspend. On resume (from non-COVERT mode), we re-init.
+        if (modeGet() == MODE_COVERT) {
+            wifiScannerDeinit();
+            if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                systemState.wifiScannerActive = false;
+                xSemaphoreGive(stateMutex);
+            }
+            Serial.println("[WIFI] COVERT — suspending task");
+            vTaskSuspend(NULL);
+            // --- Resumed by displayTask on exit from COVERT ---
+            Serial.println("[WIFI] Resumed — reinitializing");
+            wifiScannerInit();
+            if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                systemState.wifiScannerActive = true;
+                xSemaphoreGive(stateMutex);
+            }
+            lastHopMs = millis();
+            currentChannel = 1;
+            continue;
+        }
+
         // Channel hop every 100ms across channels 1-13
         if (millis() - lastHopMs > HOP_INTERVAL_MS) {
             currentChannel = (currentChannel % 13) + 1;

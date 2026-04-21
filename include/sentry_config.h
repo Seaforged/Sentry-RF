@@ -1,12 +1,32 @@
 #ifndef SENTRY_CONFIG_H
 #define SENTRY_CONFIG_H
 
+#include <stdint.h>
+
 // =====================================================================
 //  SENTRY-RF Configuration — All tunable detection constants
 //  Adjust these for field calibration without hunting through code.
 //  Hardware constants (pins, SPI, I2C) remain in board_config.h.
 //  FreeRTOS task config remains in task_config.h.
 // =====================================================================
+
+// ── Phase H: Operational modes ────────────────────────────────────────
+// STANDARD:   default — full CAD + RSSI + WiFi + OLED + buzzer + LED
+// COVERT:     RF scanning only; WiFi deinitialized, OLED off, buzzer
+//             and LED suppressed. Serial + SD logging stay active.
+// HIGH_ALERT: CAD every cycle; RSSI sweep skipped except every
+//             HIGH_ALERT_RSSI_INTERVAL_MS. Buzzer fires immediately on
+//             any WARNING/CRITICAL event (no reminder debounce).
+enum OperatingMode : uint8_t {
+    MODE_STANDARD   = 0,
+    MODE_COVERT     = 1,
+    MODE_HIGH_ALERT = 2
+};
+
+// RSSI sweep period while in HIGH_ALERT (ms). Still runs periodically as
+// a sanity check; the normal RSSI_SWEEP_INTERVAL_MS (8000) is replaced by
+// this larger value to free scan budget for back-to-back CAD cycles.
+#define HIGH_ALERT_RSSI_INTERVAL_MS  10000
 
 // ── RSSI Detection Thresholds ─────────────────────────────────────────
 static const float PEAK_THRESHOLD_DB     = 10.0f;  // dB above noise floor for peak extraction
@@ -247,5 +267,19 @@ static const unsigned long REMINDER_INTERVAL = 30000;  // 30 seconds
 // 10-point gap from one confirmed sub-GHz tap (10) + diversity bonus (20) = 30
 // to ADVISORY+WARNING (40+) on fast-FHSS signals like ELRS 200Hz.
 #define FAST_SCORE_FHSS_CLUSTER     15
+
+// ── Phase H: mode accessor API ───────────────────────────────────────
+// Defined in main.cpp. Always access via these wrappers — they take
+// stateMutex internally so cross-core reads stay consistent.
+#ifdef __cplusplus
+extern "C" {
+#endif
+OperatingMode modeGet(void);
+void          modeSet(OperatingMode m);
+const char*   modeShortLabel(OperatingMode m);  // "STD" / "COV" / "HI-ALT"
+const char*   modeLongLabel(OperatingMode m);   // "STANDARD" etc.
+#ifdef __cplusplus
+}
+#endif
 
 #endif // SENTRY_CONFIG_H
