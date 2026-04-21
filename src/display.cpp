@@ -621,7 +621,62 @@ void screenSystem(Adafruit_SSD1306& disp, const SystemState& state, int page) {
     disp.display();
 }
 
-// ── Screen 6: 2.4 GHz Spectrum (LR1121 only) ───────────────
+// ── Screen 6: ASTM F3411 Remote ID decoded payload (Phase J) ───
+
+void screenRID(Adafruit_SSD1306& disp, const SystemState& state, int page) {
+    disp.clearDisplay();
+    drawHeader(disp, "REMOTE ID");
+
+    const DecodedRID& r = state.lastRID;
+    bool stale = (!r.valid) ||
+                 (r.lastUpdateMs == 0) ||
+                 (millis() - r.lastUpdateMs > 10000);
+
+    if (stale) {
+        disp.setCursor(0, 28);
+        disp.print("RID: No data");
+    } else {
+        // Line 1: UAS ID, truncated to 21 chars (OLED width). uasID itself
+        // is already ≤20 chars + null; type suffix packs in if there's room.
+        char l1[22];
+        snprintf(l1, sizeof(l1), "ID:%s", r.uasID);
+        disp.setCursor(0, 12);
+        disp.print(l1);
+
+        // Line 2: Drone lat/lon — 4 decimals each fits in 21 chars
+        char l2[22];
+        snprintf(l2, sizeof(l2), "D:%.4f %.4f",
+                 r.droneLat, r.droneLon);
+        disp.setCursor(0, 22);
+        disp.print(l2);
+
+        // Line 3: Altitude + speed + heading
+        char l3[22];
+        snprintf(l3, sizeof(l3), "Alt:%.0fm %.0fm/s %ud",
+                 r.droneAltM, r.speedMps, r.headingDeg);
+        disp.setCursor(0, 32);
+        disp.print(l3);
+
+        // Line 4: Operator (pilot) lat/lon
+        char l4[22];
+        snprintf(l4, sizeof(l4), "P:%.4f %.4f",
+                 r.operatorLat, r.operatorLon);
+        disp.setCursor(0, 42);
+        disp.print(l4);
+
+        // Line 5: ID type + age
+        char l5[22];
+        uint32_t ageS = (millis() - r.lastUpdateMs) / 1000;
+        snprintf(l5, sizeof(l5), "%s  %lus ago", r.uasIDType, ageS);
+        disp.setCursor(0, 52);
+        disp.print(l5);
+    }
+
+    drawPageDots(disp, page, NUM_SCREENS);
+    disp.display();
+}
+
+// ── Screen 7: 2.4 GHz Spectrum (LR1121 only) ───────────────
 
 void screenSpectrum24(Adafruit_SSD1306& disp, const SystemState& state, int page) {
     disp.clearDisplay();

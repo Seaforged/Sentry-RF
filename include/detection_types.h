@@ -32,6 +32,24 @@ enum BandwidthClass : uint8_t {
 // Shared state protected by stateMutex — copy under lock, process outside lock
 static const uint8_t DET_SOURCE_WIFI = 2;
 
+// Phase J: ASTM F3411 Remote ID decoded payload. Populated by wifiScanTask
+// after a successful opendroneid-core-c decode of a beacon's vendor-specific
+// IE (OUI FA:0B:BC, OUI_type 0x0D). Consumers (display, JSONL logger) should
+// treat `valid=false` or `millis() - lastUpdateMs > 10000` as "no data".
+struct DecodedRID {
+    bool          valid;
+    char          uasID[21];       // drone serial / UAS ID (null-terminated)
+    char          uasIDType[16];   // "Serial", "CAA", "UTM", "Specific"
+    float         droneLat;        // drone latitude degrees
+    float         droneLon;        // drone longitude degrees
+    float         droneAltM;       // drone altitude metres (WGS84 geo)
+    float         operatorLat;     // operator/pilot latitude degrees
+    float         operatorLon;     // operator/pilot longitude degrees
+    float         speedMps;        // horizontal speed m/s
+    uint16_t      headingDeg;      // heading 0-359
+    unsigned long lastUpdateMs;    // millis() when last successfully decoded
+};
+
 struct SystemState {
     ScanResult      spectrum;
     ScanResult24    spectrum24;
@@ -75,6 +93,10 @@ struct SystemState {
     // peakBwClass is the bucketed BandwidthClass. Zero when no peak survived.
     uint8_t         peakBwClass;
     uint8_t         peakAdjBins;
+    // Phase J: most-recently-decoded ASTM F3411 Remote ID payload. Fields stay
+    // populated until a newer decode overwrites them; use lastUpdateMs for
+    // freshness checks (display/logger treat >10s as stale).
+    DecodedRID      lastRID;
 };
 
 // Detection event sources

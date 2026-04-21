@@ -109,13 +109,15 @@ void loggerWrite(const SystemState& state, uint32_t sweepNum) {
     // JSONL field test log — one JSON object per line. peak_bw and peak_bins
     // (Phase I) describe the bandwidth class of the strongest sub-GHz peak:
     // 0=NARROW, 1=MEDIUM, 2=WIDE (see BandwidthClass in detection_types.h).
+    // Phase J: rid_* fields are appended when lastRID.valid is true — each
+    // row is self-describing JSON so the parser tolerates missing keys.
     if (jsonlFile) {
         jsonlFile.printf("{\"t\":%lu,\"c\":%u,\"threat\":%d,\"score\":%d,"
                          "\"div\":%d,\"conf\":%d,\"taps\":%d,"
                          "\"peak_mhz\":%.1f,\"peak_dbm\":%.1f,"
                          "\"peak_bw\":%u,\"peak_bins\":%u,"
                          "\"lat\":%.7f,\"lon\":%.7f,\"fix\":%d,\"sv\":%d,"
-                         "\"jam\":%d,\"spoof\":%d,\"cno_sd\":%.1f}\n",
+                         "\"jam\":%d,\"spoof\":%d,\"cno_sd\":%.1f",
                          ts, sweepNum, (int)state.threatLevel, state.confidenceScore,
                          state.cadDiversity, state.cadConfirmed, state.cadTotalTaps,
                          state.spectrum.peakFreq, state.spectrum.peakRSSI,
@@ -124,6 +126,16 @@ void loggerWrite(const SystemState& state, uint32_t sweepNum) {
                          state.gps.fixType, state.gps.numSV,
                          state.gps.jamInd, state.gps.spoofDetState,
                          state.integrity.cnoStdDev);
+        if (state.lastRID.valid) {
+            jsonlFile.printf(",\"rid_id\":\"%s\","
+                             "\"rid_dlat\":%.6f,\"rid_dlon\":%.6f,\"rid_dalt\":%.1f,"
+                             "\"rid_olat\":%.6f,\"rid_olon\":%.6f",
+                             state.lastRID.uasID,
+                             state.lastRID.droneLat, state.lastRID.droneLon,
+                             state.lastRID.droneAltM,
+                             state.lastRID.operatorLat, state.lastRID.operatorLon);
+        }
+        jsonlFile.print("}\n");
     }
 
     writeCount++;

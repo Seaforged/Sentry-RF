@@ -447,7 +447,9 @@ static void gpsReadTask(void* param) {
 // Screen render dispatch — one function per screen, all take the same signature
 typedef void (*ScreenFn)(Adafruit_SSD1306&, const SystemState&, int);
 static const ScreenFn screens[] = {
-    screenDashboard, screenSpectrum, screenGPS, screenIntegrity, screenThreat, screenSystem
+    screenDashboard, screenSpectrum, screenGPS, screenIntegrity, screenThreat, screenSystem,
+    // Phase J: RID screen appears on every board — all three have WIFI_ENABLED.
+    screenRID
 #ifdef BOARD_T3S3_LR1121
     , screenSpectrum24
 #endif
