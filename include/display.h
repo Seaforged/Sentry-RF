@@ -7,10 +7,13 @@
 static const int SCREEN_WIDTH  = 128;
 static const int SCREEN_HEIGHT = 64;
 
+// Phase J: SCREEN_RID added on every board with a WiFi scanner (all three).
+// Layout: 0=Dashboard, 1=Spectrum, 2=GPS, 3=Integrity, 4=Threat, 5=System,
+// 6=RID, (LR1121 only) 7=Spectrum24.
 #ifdef BOARD_T3S3_LR1121
-static const int NUM_SCREENS = 7;  // +dashboard +2.4GHz spectrum
+static const int NUM_SCREENS = 8;
 #else
-static const int NUM_SCREENS = 6;  // +dashboard
+static const int NUM_SCREENS = 7;
 #endif
 
 // RSSI range for bar chart vertical scaling
@@ -49,7 +52,10 @@ void screenThreat(Adafruit_SSD1306& disp, const SystemState& state, int page);
 // Screen 5: System info
 void screenSystem(Adafruit_SSD1306& disp, const SystemState& state, int page);
 
-// Screen 6: 2.4 GHz spectrum (LR1121 only)
+// Screen 6: ASTM F3411 Remote ID decoded payload (Phase J)
+void screenRID(Adafruit_SSD1306& disp, const SystemState& state, int page);
+
+// Screen 7: 2.4 GHz spectrum (LR1121 only)
 void screenSpectrum24(Adafruit_SSD1306& disp, const SystemState& state, int page);
 
 void drawPageDots(Adafruit_SSD1306& disp, int current, int total);

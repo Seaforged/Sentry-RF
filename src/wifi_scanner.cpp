@@ -5,6 +5,15 @@
 #include <esp_wifi.h>
 #include <string.h>
 
+// Phase J: ASTM F3411 Remote ID payload decode via opendroneid-core-c.
+// opendroneid.h is a C header with its own extern "C" wrapping. We only call
+// odid_message_process_pack(); the rest of the library (printf helpers, NAN
+// frame builder, etc.) is compiled but stripped by the linker or disabled via
+// -DODID_DISABLE_PRINTF in platformio.ini.
+extern "C" {
+#include "opendroneid.h"
+}
+
 // ── Packet capture queue ────────────────────────────────────────────────────
 
 static const int MAX_PAYLOAD = 256;
@@ -139,7 +148,13 @@ static const char* identifyDroneMAC(const uint8_t* mac) {
 // Parse 802.11 Information Elements for ASTM F3411 Remote ID OUI (FA:0B:BC).
 // Beacon body: 8 bytes timestamp + 2 bytes interval + 2 bytes capability = 12 fixed,
 // then IEs start at offset 12 within the body payload.
-static bool hasRemoteIdIE(const CapturedFrame& frame) {
+//
+// Phase J: extended to optionally return the offset and length of the IE's
+// *data* bytes (after element_id + length). Caller uses this to feed the
+// message pack (minus oui[3] + oui_type[1] + message_counter[1]) to
+// odid_message_process_pack(). Pass nullptrs if only presence is needed.
+static bool findRemoteIdIE(const CapturedFrame& frame,
+                           uint16_t* outDataOffset, uint16_t* outDataLen) {
     // Only beacons (0x80) and action frames (0xD0) can carry Remote ID
     if (frame.frameType != 0x80 && frame.frameType != 0xD0) return false;
 
@@ -159,6 +174,8 @@ static bool hasRemoteIdIE(const CapturedFrame& frame) {
             if (frame.payload[pos + 2] == REMOTE_ID_OUI[0] &&
                 frame.payload[pos + 3] == REMOTE_ID_OUI[1] &&
                 frame.payload[pos + 4] == REMOTE_ID_OUI[2]) {
+                if (outDataOffset) *outDataOffset = pos + 2;  // after eid+length
+                if (outDataLen)    *outDataLen    = elen;
                 return true;
             }
         }
@@ -166,6 +183,81 @@ static bool hasRemoteIdIE(const CapturedFrame& frame) {
         pos += 2 + elen;
     }
     return false;
+}
+
+static bool hasRemoteIdIE(const CapturedFrame& frame) {
+    return findRemoteIdIE(frame, nullptr, nullptr);
+}
+
+// Phase J: Convert ODID_idtype_t enum to the 4 canonical short strings from
+// astm.md (Serial / CAA / UTM / Specific). ODID_IDTYPE_NONE and any future
+// additions map to "Unknown" so we never write garbage into the log.
+static const char* idTypeToString(uint8_t t) {
+    switch (t) {
+        case ODID_IDTYPE_SERIAL_NUMBER:         return "Serial";
+        case ODID_IDTYPE_CAA_REGISTRATION_ID:   return "CAA";
+        case ODID_IDTYPE_UTM_ASSIGNED_UUID:     return "UTM";
+        case ODID_IDTYPE_SPECIFIC_SESSION_ID:   return "Specific";
+        default:                                return "Unknown";
+    }
+}
+
+// Phase J: Decode an ASTM F3411 beacon IE into a DecodedRID. Returns true on
+// a clean decode where the BasicID and Location fields are populated. The IE
+// layout inside the vendor-specific IE data (after eid+length) is:
+//   [0..2]  OUI = FA:0B:BC                    (already matched)
+//   [3]     OUI type = 0x0D                   (ASTM F3411 fixed value)
+//   [4]     message counter                   (varies, not needed)
+//   [5..]   ODID_MessagePack_encoded          (fed to odid_message_process_pack)
+// ieDataOffset/ieDataLen come from findRemoteIdIE(); ieDataLen includes the
+// OUI + OUI_type + counter prefix, so we advance 5 bytes and pass the rest.
+static bool decodeBeaconRID(const CapturedFrame& frame,
+                            uint16_t ieDataOffset, uint16_t ieDataLen,
+                            DecodedRID& out) {
+    memset(&out, 0, sizeof(out));
+
+    // Require the OUI_type byte = 0x0D (ASTM F3411 beacon). Anything else in
+    // this IE slot is a different vendor extension sharing the OUI and won't
+    // decode.
+    if (ieDataLen < 5) return false;
+    uint8_t ouiType = frame.payload[ieDataOffset + 3];
+    if (ouiType != 0x0D) return false;
+
+    const uint8_t* pack = frame.payload + ieDataOffset + 5;
+    uint16_t       packLen = ieDataLen - 5;
+
+    ODID_UAS_Data uas;
+    odid_initUasData(&uas);
+    int processed = odid_message_process_pack(&uas, pack, packLen);
+    if (processed < 0) return false;
+
+    // BasicID[0] is usually present in a beacon pack; guard on BasicIDValid.
+    if (uas.BasicIDValid[0]) {
+        strncpy(out.uasID, uas.BasicID[0].UASID, sizeof(out.uasID) - 1);
+        out.uasID[sizeof(out.uasID) - 1] = '\0';
+        const char* t = idTypeToString((uint8_t)uas.BasicID[0].IDType);
+        strncpy(out.uasIDType, t, sizeof(out.uasIDType) - 1);
+        out.uasIDType[sizeof(out.uasIDType) - 1] = '\0';
+    }
+
+    if (uas.LocationValid) {
+        out.droneLat   = (float)uas.Location.Latitude;
+        out.droneLon   = (float)uas.Location.Longitude;
+        out.droneAltM  = uas.Location.AltitudeGeo;  // WGS84-HAE; -1000 = unknown
+        out.speedMps   = uas.Location.SpeedHorizontal;
+        // Direction is 0..360 (361 = unknown); clamp to 0..359 as uint16_t.
+        float dir = uas.Location.Direction;
+        out.headingDeg = (dir >= 0.0f && dir < 360.0f) ? (uint16_t)dir : 0;
+    }
+
+    if (uas.SystemValid) {
+        out.operatorLat = (float)uas.System.OperatorLatitude;
+        out.operatorLon = (float)uas.System.OperatorLongitude;
+    }
+
+    out.valid        = uas.BasicIDValid[0] || uas.LocationValid;
+    out.lastUpdateMs = millis();
+    return out.valid;
 }
 
 // ── WiFi scan task ──────────────────────────────────────────────────────────
@@ -226,7 +318,8 @@ void wifiScanTask(void* param) {
         // Process captured frames
         if (xQueueReceive(wifiPacketQueue, &frame, pdMS_TO_TICKS(10)) == pdTRUE) {
             const char* droneName = identifyDroneMAC(frame.srcMAC);
-            bool isRemoteId = hasRemoteIdIE(frame);
+            uint16_t ieDataOffset = 0, ieDataLen = 0;
+            bool isRemoteId = findRemoteIdIE(frame, &ieDataOffset, &ieDataLen);
 
             if (droneName != nullptr || isRemoteId) {
                 DetectionEvent event = {};
@@ -237,21 +330,41 @@ void wifiScanTask(void* param) {
                 event.timestamp = millis();
 
                 if (isRemoteId) {
+                    // Phase J: attempt full payload decode. If it fails (truncated
+                    // frame, wrong OUI type, garbled pack) we still raise the
+                    // WARNING — presence of the IE alone is a valid detection.
+                    DecodedRID rid;
+                    bool decoded = decodeBeaconRID(frame, ieDataOffset, ieDataLen, rid);
+
                     // Signal to detection engine via shared state
                     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                         systemState.remoteIdDetected = true;
                         systemState.remoteIdLastMs = millis();
+                        if (decoded) systemState.lastRID = rid;
                         xSemaphoreGive(stateMutex);
                     }
-                    Serial.printf("[WIFI] RID beacon from %02X:%02X:%02X:%02X:%02X:%02X ch%d RSSI:%d\n",
-                                  frame.srcMAC[0], frame.srcMAC[1], frame.srcMAC[2],
-                                  frame.srcMAC[3], frame.srcMAC[4], frame.srcMAC[5],
-                                  frame.channel, frame.rssi);
-                    snprintf(event.description, sizeof(event.description),
-                             "RemoteID %02X:%02X:%02X:%02X:%02X:%02X ch%d",
-                             frame.srcMAC[0], frame.srcMAC[1], frame.srcMAC[2],
-                             frame.srcMAC[3], frame.srcMAC[4], frame.srcMAC[5],
-                             frame.channel);
+
+                    if (decoded) {
+                        Serial.printf("[RID] UAS-ID: %s Drone: %.6f,%.6f,%.1fm "
+                                      "Operator: %.6f,%.6f Speed: %.1fm/s Hdg: %udeg\n",
+                                      rid.uasID,
+                                      rid.droneLat, rid.droneLon, rid.droneAltM,
+                                      rid.operatorLat, rid.operatorLon,
+                                      rid.speedMps, rid.headingDeg);
+                        snprintf(event.description, sizeof(event.description),
+                                 "RID %s @%.4f,%.4f",
+                                 rid.uasID, rid.droneLat, rid.droneLon);
+                    } else {
+                        Serial.printf("[WIFI] RID beacon from %02X:%02X:%02X:%02X:%02X:%02X ch%d RSSI:%d (undecoded)\n",
+                                      frame.srcMAC[0], frame.srcMAC[1], frame.srcMAC[2],
+                                      frame.srcMAC[3], frame.srcMAC[4], frame.srcMAC[5],
+                                      frame.channel, frame.rssi);
+                        snprintf(event.description, sizeof(event.description),
+                                 "RemoteID %02X:%02X:%02X:%02X:%02X:%02X ch%d",
+                                 frame.srcMAC[0], frame.srcMAC[1], frame.srcMAC[2],
+                                 frame.srcMAC[3], frame.srcMAC[4], frame.srcMAC[5],
+                                 frame.channel);
+                    }
                 } else {
                     snprintf(event.description, sizeof(event.description),
                              "%s WiFi %02X:%02X:%02X:%02X:%02X:%02X ch%d",
