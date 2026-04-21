@@ -308,6 +308,14 @@ static const int WEIGHT_CONFIRM_BW_WIDE = 10;
 // state. Raise this if legitimate slow cycles trip the alarm in the field.
 #define SCAN_WATCHDOG_MS            5000
 
+// ── Phase L: ZMQ/DragonSync JSON serial output ───────────────────────
+// emitZmqJson() prints structured [ZMQ] JSON lines on threat transitions
+// and decoded Remote ID events. A companion Python bridge running on the
+// host (tools/zmq_bridge.py) re-publishes them as real ZMQ PUB messages
+// on tcp://*:4227. Disabling compiles the function to an empty body so
+// the call sites become no-ops (LTO elides the call).
+#define ENABLE_ZMQ_OUTPUT           1
+
 // ── Phase H: mode accessor API ───────────────────────────────────────
 // Defined in main.cpp. Always access via these wrappers — they take
 // stateMutex internally so cross-core reads stay consistent.

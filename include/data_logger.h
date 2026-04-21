@@ -23,4 +23,12 @@ void loggerLogModeChange(const char* modeLabel, const char* uptimeHMS);
 // evaluated asynchronously after the self-test completes.
 void loggerLogSelfTest(bool radioOK, bool antennaOK, uint32_t bootCount);
 
+// Phase L: structured [ZMQ] JSON line for the host-side DragonSync bridge.
+// eventType must be "threat" or "rid"; anything else is a no-op.
+// Internally debounces to ≤ 1 Hz per event type and acquires serialMutex
+// so the line never interleaves with other serial output. When
+// ENABLE_ZMQ_OUTPUT is 0 the body compiles to empty and LTO elides
+// the call.
+void emitZmqJson(const SystemState& state, const char* eventType);
+
 #endif // DATA_LOGGER_H

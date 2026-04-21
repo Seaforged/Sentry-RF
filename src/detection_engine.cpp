@@ -4,6 +4,7 @@
 #include "cad_scanner.h"
 #include "rf_scanner.h"
 #include "sentry_config.h"
+#include "data_logger.h"   // Phase L: emitZmqJson on threat transitions
 #include <Arduino.h>
 #include <math.h>
 #include <string.h>
@@ -1485,6 +1486,20 @@ ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& int
     // the only emit path — the legacy per-source block is gone).
     if (prevThreat != currentThreat) {
         emitCandidateThreatEvent(currentThreat, decision.anchorFreq);
+
+        // Phase L: ZMQ/DragonSync line. Snapshot SystemState under lock —
+        // emitZmqJson takes serialMutex internally for the printf, so we
+        // drop stateMutex before calling to avoid lock ordering hazards.
+        if (stateMutex) {
+            SystemState snap;
+            bool have = false;
+            if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                snap = systemState;
+                xSemaphoreGive(stateMutex);
+                have = true;
+            }
+            if (have) emitZmqJson(snap, "threat");
+        }
     }
 
     // Phase G.1b: sustained-clear diversity reset. If the committed threat

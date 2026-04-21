@@ -1,10 +1,83 @@
 #include "data_logger.h"
 #include "board_config.h"
+#include "sentry_config.h"
 #include "version.h"
 #include <Arduino.h>
+#include <string.h>
 
 static uint32_t writeCount = 0;
 static const uint32_t FLUSH_INTERVAL = 10;
+
+// Phase L: ZMQ emit debouncers — enforce ≤ 1 Hz per event type so a tight
+// transition flap or a busy RID beacon can't flood the serial link. Kept
+// at file scope (not inside #ifdef blocks) since emitZmqJson is board-
+// agnostic.
+static unsigned long lastZmqThreatMs = 0;
+static unsigned long lastZmqRidMs    = 0;
+
+void emitZmqJson(const SystemState& state, const char* eventType) {
+#if ENABLE_ZMQ_OUTPUT
+    if (eventType == nullptr) return;
+    unsigned long now = millis();
+
+    // Per-event-type 1 Hz debounce. strcmp() over "threat" / "rid" costs
+    // ~10ns, trivial against the Serial.printf below.
+    if (strcmp(eventType, "threat") == 0) {
+        if (now - lastZmqThreatMs < 1000UL && lastZmqThreatMs != 0) return;
+        lastZmqThreatMs = now;
+    } else if (strcmp(eventType, "rid") == 0) {
+        if (now - lastZmqRidMs < 1000UL && lastZmqRidMs != 0) return;
+        lastZmqRidMs = now;
+    } else {
+        return;  // unknown event type — drop silently
+    }
+
+    // Take serialMutex so the printf doesn't interleave with concurrent
+    // output from other tasks (LoRa scan CSV, alert ESCALATION, etc.).
+    // Short timeout — if we can't get the mutex quickly, skip this emit
+    // rather than block the caller (threat transitions are time-critical).
+    bool locked = false;
+    if (serialMutex &&
+        xSemaphoreTake(serialMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        locked = true;
+    }
+
+    // Prefix is EXACTLY "[ZMQ] " (6 chars) — the Python bridge strips
+    // with line[6:] so any change here breaks the wire format.
+    if (strcmp(eventType, "threat") == 0) {
+        Serial.printf("[ZMQ] {\"type\":\"threat\",\"ts\":%lu,\"threat\":%d,"
+                      "\"score\":%d,\"freq_mhz\":%.1f,\"rssi_dbm\":%.1f,"
+                      "\"lat\":%.6f,\"lon\":%.6f,\"alt_m\":%d,"
+                      "\"cad_conf\":%d,\"div\":%d,\"mode\":\"%s\"}\n",
+                      now,
+                      (int)state.threatLevel,
+                      state.confidenceScore,
+                      state.spectrum.peakFreq, state.spectrum.peakRSSI,
+                      state.gps.latDeg7 / 1e7,
+                      state.gps.lonDeg7 / 1e7,
+                      (int)(state.gps.altMM / 1000),
+                      state.cadConfirmed,
+                      state.cadDiversity,
+                      modeShortLabel(modeGet()));
+    } else {  // "rid" (checked above)
+        const DecodedRID& r = state.lastRID;
+        Serial.printf("[ZMQ] {\"type\":\"rid\",\"ts\":%lu,\"uas_id\":\"%s\","
+                      "\"uas_type\":\"%s\",\"d_lat\":%.4f,\"d_lon\":%.4f,"
+                      "\"d_alt_m\":%.1f,\"o_lat\":%.4f,\"o_lon\":%.4f,"
+                      "\"spd_mps\":%.1f,\"hdg\":%u}\n",
+                      now,
+                      r.uasID, r.uasIDType,
+                      r.droneLat, r.droneLon, r.droneAltM,
+                      r.operatorLat, r.operatorLon,
+                      r.speedMps, (unsigned)r.headingDeg);
+    }
+
+    if (locked) xSemaphoreGive(serialMutex);
+#else
+    (void)state;
+    (void)eventType;
+#endif
+}
 
 // CSV header written once at file creation
 static const char* CSV_HEADER =

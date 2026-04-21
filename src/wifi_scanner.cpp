@@ -1,6 +1,7 @@
 #include "wifi_scanner.h"
 #include "board_config.h"
 #include "sentry_config.h"
+#include "data_logger.h"   // Phase L: emitZmqJson on decoded RID
 #include <Arduino.h>
 #include <esp_wifi.h>
 #include <string.h>
@@ -336,11 +337,18 @@ void wifiScanTask(void* param) {
                     DecodedRID rid;
                     bool decoded = decodeBeaconRID(frame, ieDataOffset, ieDataLen, rid);
 
-                    // Signal to detection engine via shared state
+                    // Signal to detection engine via shared state. Snapshot
+                    // while we hold the mutex so the Phase L ZMQ emit below
+                    // doesn't need to re-acquire (and so it sees the fields
+                    // we just wrote).
+                    SystemState snap;
+                    bool haveSnap = false;
                     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                         systemState.remoteIdDetected = true;
                         systemState.remoteIdLastMs = millis();
                         if (decoded) systemState.lastRID = rid;
+                        snap = systemState;
+                        haveSnap = true;
                         xSemaphoreGive(stateMutex);
                     }
 
@@ -351,6 +359,7 @@ void wifiScanTask(void* param) {
                                       rid.droneLat, rid.droneLon, rid.droneAltM,
                                       rid.operatorLat, rid.operatorLon,
                                       rid.speedMps, rid.headingDeg);
+                        if (haveSnap) emitZmqJson(snap, "rid");
                         snprintf(event.description, sizeof(event.description),
                                  "RID %s @%.4f,%.4f",
                                  rid.uasID, rid.droneLat, rid.droneLon);
