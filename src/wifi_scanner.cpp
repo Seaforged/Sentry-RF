@@ -39,6 +39,14 @@ static const int PACKET_QUEUE_DEPTH = 20;
 // wifi_scanner.h so displayTask can vTaskResume() us on exit from COVERT.
 TaskHandle_t hWiFiTask = nullptr;
 
+// Fix1 F2: ISR-side drop counter. xQueueSendFromISR returns pdFAIL if the
+// queue is full; we increment a volatile counter and the task logs+resets
+// it once per second so we notice if the capture pipeline is saturating
+// (e.g. from a WiFi-rich RF environment overwhelming the decode path).
+static volatile uint32_t wifiQueueDrops = 0;
+static unsigned long g_wifiLastDropLogMs = 0;
+static const unsigned long WIFI_DROP_LOG_INTERVAL_MS = 1000;
+
 // Per-channel frame counters for Dashboard mini chart. Incremented from the
 // ISR callback on every captured management frame; snapshotted into
 // SystemState.wifiChannelCount by wifiScanTask once per second, then reset.
@@ -94,13 +102,31 @@ static void IRAM_ATTR wifiPromiscuousCallback(void* buf, wifi_promiscuous_pkt_ty
         memcpy(frame.payload, pkt->payload + 24, bodyLen);
     }
 
-    xQueueSendFromISR(wifiPacketQueue, &frame, nullptr);
+    BaseType_t higherPriorityWoken = pdFALSE;
+    if (xQueueSendFromISR(wifiPacketQueue, &frame, &higherPriorityWoken) != pdTRUE) {
+        // Queue full. Increment the drop counter — the task-side loop will
+        // log it within 1 s. Using a volatile counter is safe from ISR
+        // because single-word writes are atomic on ESP32-S3.
+        wifiQueueDrops++;
+    }
+    if (higherPriorityWoken) portYIELD_FROM_ISR();
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
 void wifiScannerInit() {
-    wifiPacketQueue = xQueueCreate(PACKET_QUEUE_DEPTH, sizeof(CapturedFrame));
+    // Fix1 F2: queue created exactly once at boot. On COVERT resume this
+    // function is called again — instead of creating a second queue (and
+    // leaking the handle), we drain the existing one so stale frames from
+    // the previous session don't confuse the new scanning window.
+    if (wifiPacketQueue == nullptr) {
+        wifiPacketQueue = xQueueCreate(PACKET_QUEUE_DEPTH, sizeof(CapturedFrame));
+    } else {
+        // Flush any stale captures left over from pre-COVERT. 0 timeout
+        // returns immediately once the queue is empty.
+        CapturedFrame scratch;
+        while (xQueueReceive(wifiPacketQueue, &scratch, 0) == pdTRUE) { /* drain */ }
+    }
 
     // Use ESP-IDF WiFi API directly for promiscuous mode
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -116,12 +142,12 @@ void wifiScannerInit() {
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
 
-    Serial.println("[WIFI] Promiscuous scanner active — channel hopping");
+    SERIAL_SAFE(Serial.println("[WIFI] Promiscuous scanner active — channel hopping"));
 }
 
 void wifiScannerStop() {
     esp_wifi_set_promiscuous(false);
-    Serial.println("[WIFI] Promiscuous scanner stopped");
+    SERIAL_SAFE(Serial.println("[WIFI] Promiscuous scanner stopped"));
 }
 
 // Full teardown — used by COVERT mode to eliminate WiFi RF emissions.
@@ -132,8 +158,8 @@ void wifiScannerDeinit() {
     esp_wifi_set_promiscuous(false);
     esp_err_t stopErr = esp_wifi_stop();
     esp_err_t deinitErr = esp_wifi_deinit();
-    Serial.printf("[WIFI] Deinit — stop:0x%x deinit:0x%x\n",
-                  (unsigned)stopErr, (unsigned)deinitErr);
+    SERIAL_SAFE(Serial.printf("[WIFI] Deinit — stop:0x%x deinit:0x%x\n",
+                              (unsigned)stopErr, (unsigned)deinitErr));
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -288,10 +314,10 @@ void wifiScanTask(void* param) {
                 systemState.wifiScannerActive = false;
                 xSemaphoreGive(stateMutex);
             }
-            Serial.println("[WIFI] COVERT — suspending task");
+            SERIAL_SAFE(Serial.println("[WIFI] COVERT — suspending task"));
             vTaskSuspend(NULL);
             // --- Resumed by displayTask on exit from COVERT ---
-            Serial.println("[WIFI] Resumed — reinitializing");
+            SERIAL_SAFE(Serial.println("[WIFI] Resumed — reinitializing"));
             wifiScannerInit();
             if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                 systemState.wifiScannerActive = true;
@@ -324,6 +350,20 @@ void wifiScanTask(void* param) {
                 xSemaphoreGive(stateMutex);
             }
             g_wifiLastSnapshotMs = now;
+        }
+
+        // Fix1 F2: log ISR queue drops once per second if any accumulated.
+        // Snapshot-and-reset is non-atomic but the resulting undercount is
+        // bounded by the 100 ms ISR rate — acceptable for a saturation
+        // warning that's informational, not a counter for billing.
+        if (now - g_wifiLastDropLogMs >= WIFI_DROP_LOG_INTERVAL_MS) {
+            uint32_t drops = wifiQueueDrops;
+            if (drops > 0) {
+                wifiQueueDrops = 0;
+                SERIAL_SAFE(Serial.printf("[WIFI] Queue overflow — dropped %u frames in last 1s\n",
+                                          (unsigned)drops));
+            }
+            g_wifiLastDropLogMs = now;
         }
 
         // Process captured frames
@@ -363,21 +403,21 @@ void wifiScanTask(void* param) {
                     }
 
                     if (decoded) {
-                        Serial.printf("[RID] UAS-ID: %s Drone: %.6f,%.6f,%.1fm "
-                                      "Operator: %.6f,%.6f Speed: %.1fm/s Hdg: %udeg\n",
-                                      rid.uasID,
-                                      rid.droneLat, rid.droneLon, rid.droneAltM,
-                                      rid.operatorLat, rid.operatorLon,
-                                      rid.speedMps, rid.headingDeg);
+                        SERIAL_SAFE(Serial.printf("[RID] UAS-ID: %s Drone: %.6f,%.6f,%.1fm "
+                                                  "Operator: %.6f,%.6f Speed: %.1fm/s Hdg: %udeg\n",
+                                                  rid.uasID,
+                                                  rid.droneLat, rid.droneLon, rid.droneAltM,
+                                                  rid.operatorLat, rid.operatorLon,
+                                                  rid.speedMps, rid.headingDeg));
                         if (haveSnap) emitZmqJson(snap, "rid");
                         snprintf(event.description, sizeof(event.description),
                                  "RID %s @%.4f,%.4f",
                                  rid.uasID, rid.droneLat, rid.droneLon);
                     } else {
-                        Serial.printf("[WIFI] RID beacon from %02X:%02X:%02X:%02X:%02X:%02X ch%d RSSI:%d (undecoded)\n",
-                                      frame.srcMAC[0], frame.srcMAC[1], frame.srcMAC[2],
-                                      frame.srcMAC[3], frame.srcMAC[4], frame.srcMAC[5],
-                                      frame.channel, frame.rssi);
+                        SERIAL_SAFE(Serial.printf("[WIFI] RID beacon from %02X:%02X:%02X:%02X:%02X:%02X ch%d RSSI:%d (undecoded)\n",
+                                                  frame.srcMAC[0], frame.srcMAC[1], frame.srcMAC[2],
+                                                  frame.srcMAC[3], frame.srcMAC[4], frame.srcMAC[5],
+                                                  frame.channel, frame.rssi));
                         snprintf(event.description, sizeof(event.description),
                                  "RemoteID %02X:%02X:%02X:%02X:%02X:%02X ch%d",
                                  frame.srcMAC[0], frame.srcMAC[1], frame.srcMAC[2],

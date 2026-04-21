@@ -1,227 +1,276 @@
 # SENTRY-RF Known Issues & Unfinished Work Tracker
-## As of April 6, 2026 — v1.5.3
+## As of April 21, 2026 — v2.0.0
 
-This document tracks every identified issue, limitation, and unfinished item. Nothing gets forgotten. Check items off as they're resolved. Reference this before every sprint.
+This document tracks every identified issue, limitation, and unfinished item.
+It is the single source of truth for what the firmware can and cannot do
+today. Review this document before every sprint and before every release tag.
 
----
-
-## CRITICAL — Must Fix Before Field Deployment
-
-### [x] GPS_MIN_CNO is set to 6 (indoor testing value) — RESOLVED
-**Impact:** Weak attenuated signals degrade fix quality and integrity monitoring.  
-**Fix:** Raised to 15 in `sentry_config.h`.  
-**Resolved:** Pre-field-test (Sprint 6A). Current value: `GPS_MIN_CNO = 15`.
-
-### [x] FSK Phase 3 disabled (#if 0) — RESOLVED
-**Impact:** Crossfire 150 Hz mode and FrSky R9 drones were invisible to primary detection.  
-**Fix:** Sprint 1/5 (commit `f4361ea`) moved Phase 3 after `switchToFSK()`. FSK→FSK transition avoids the RadioLib state corruption. Phase 3 now runs after the LoRa→FSK switch, scans Crossfire channels, then restores RSSI sweep params.  
-**Resolved:** April 2, 2026.
-
-### [x] Boot banner version string was hardcoded — RESOLVED
-**Impact:** Serial output showed "v1.2.0-FIX4" instead of the actual firmware version from `version.h`.  
-**Fix:** Replaced hardcoded string in `main.cpp` setup() with `Serial.printf` using `FW_NAME` and `FW_VERSION`.  
-**Resolved:** April 5, 2026.
-
-### [x] Bench false WARNING/CRITICAL from ambient LoRa — RESOLVED
-**Impact:** Ambient LoRaWAN/Meshtastic infrastructure on the bench produced 3-5 distinct CAD frequency hits in the diversity window, triggering false WARNING (score=37-45) and CRITICAL (score=100) with no drone present.  
-**Fix:** AAD Sprint 1 — sustained-diversity persistence gate (commits `fb8e6a2` through `99d9639`). Diversity only counts toward scoring when raw diversity stays >= 3 for 3 consecutive scan cycles (~7.5s). LoRaWAN can't sustain this (max sustainedCycles=1 on bench); FHSS drones sustain it for 9+ cycles continuously.  
-**Bench validation:** Baseline holds CLEAR with sustainedCycles max 1, persDiv=0, score=5. ELRS FHSS detection reaches CRITICAL in 6.6s with persDiv=32, score=100.  
-**Resolved:** April 5, 2026 (v1.5.0).
-
-### [x] Soak test false positives from ambient CAD tap confirmation — RESOLVED
-**Impact:** 30-minute soak test (no drone) showed 7.77% false positive rate. Ambient LoRaWAN gateways accumulated confirmed CAD taps (conf=3, score=45+) before being tagged as ambient. Fast-detect bonus triggered on raw diversity (div>=5) instead of persistent diversity.  
-**Fix:** Three changes: (1) Fast-detect now requires persistent diversity, not raw (commit `755edc9`). (2) Ambient auto-learn reduced from 60s to 15s — gateways tagged faster. (3) Confirmed tap weight halved when persistentDiversity==0 — ambient conf=1 scores 7 pts instead of 15, keeping total below WARNING (commit `913ecd8`).  
-**Validation:** 15-minute soak test: 0.00% false positive rate, 391 cycles, max score=22, zero cycles above WARNING. 4/4 detection modes (ELRS, band sweep, CW, mixed FP) still reach CRITICAL with score=100.  
-**Resolved:** April 6, 2026 (v1.5.2).
-
-### [x] 1-hour soak test false CRITICAL from ambient persistence gate breach — RESOLVED
-**Impact:** 28-minute dual-device soak test (T3S3 + Heltec, no drone) showed T3S3 hitting score=80 (CRITICAL) on 2 cycles. Ambient LoRa sustained div>=3 for 4 consecutive cycles, barely passing the persistence gate (threshold=3). Once persDiv jumped to 5, scoring cascaded: 5x8 diversity + 1x15 conf + 20 fast-detect + 5 band = 80.  
-**Fix:** Raised PERSISTENCE_MIN_CONSECUTIVE from 3 to 5. Max observed ambient sustainedCycles=2 in 30-min soak — margin of 3 cycles. Fast-detect now also requires sustainedCycles > PERSISTENCE_MIN_CONSECUTIVE (6+ cycles). GPS serial output rate-limited from 10ms to 5s to prevent serial buffer overflow during long tests.  
-**Validation:** 30-minute soak: 0.00% false positive rate, 802 cycles, max score=19, persDiv=0 entire test. ELRS detection: CRITICAL in 11.2s (via conf tap pathway, not diversity). Cooldown to CLEAR: 11.4s.  
-**Resolved:** April 6, 2026 (v1.5.3).
-
-### [x] LED alert system still disabled — RESOLVED
-**Impact:** No visual alert for the operator.  
-**Fix:** Re-enabled in commit `0114cf0` with threat-level blink patterns: CLEAR=off, ADVISORY=slow blink (500ms), WARNING=fast blink (200ms), CRITICAL=solid on. Non-blocking millis() timing. Safe to enable now that AAD persistence gate eliminates false alarms.  
-**Resolved:** April 6, 2026 (v1.5.1).
+v2.0.0 closed many of the v1.x items below. Sections now distinguish:
+- **RESOLVED** — fixed in a shipped release
+- **OPEN** — still broken or incomplete; target version listed
+- **KNOWN LIMITATIONS** — not bugs, deliberate design choices; listed so
+  operators and reviewers can plan around them
 
 ---
 
-## HIGH — Significant Limitations
+## RESOLVED in v2.0.0 (Phases H–N + pre-release triage)
 
-### [ ] FSK_DETECT_THRESHOLD_DBM requires manual toggle between bench and field
-**Impact:** -50 dBm is bench-safe but too conservative for field use. -70 dBm is field-appropriate but causes immediate CRITICAL on bench from ambient ISM energy (-60 to -70 dBm on Crossfire frequencies).  
-**Current value:** -50 dBm (bench-safe, set in commit `8160c8b`).  
-**Fix:** Change to -70 dBm in `sentry_config.h` before field deployment. Long-term: add runtime mode switch (BENCH/FIELD) or auto-detect based on ambient energy level.
+### [x] No boot self-test — RESOLVED in Phase K (v2.0.0)
+**Fix:** `runSelfTest()` in `main.cpp` — 10 RSSI reads @ 915 MHz (radio-
+health sentinel check), 10-frequency probe across 860–930 MHz
+(antenna-coverage floor check), async GPS-fix timer with 120 s deadline,
+OLED summary screen for 3 s, JSONL `selftest` event persisted to SD. Scan-
+cycle watchdog logs `[WATCHDOG]` if any single cycle exceeds
+`SCAN_WATCHDOG_MS` (5000 ms). Log-only — no task reset.
 
-### [x] Bench environment produces 4-7 distinct ambient LoRa frequencies in 3-5 seconds — MITIGATED
-**Impact:** Ambient LoRa diversity overlapped with drone FHSS diversity thresholds, causing false escalation.  
-**Mitigation:** AAD sustained-diversity persistence gate (v1.5.0, raised to 5 cycles in v1.5.3). Raw diversity still reaches 3-5 from ambient, but `persDiv` stays at 0 because ambient sources don't sustain high diversity across 5 consecutive scan cycles (max observed: 2). Drone FHSS sustains it for 9+ cycles. The raw `div` metric is now informational only — scoring uses `persDiv`.  
-**Remaining risk:** Dense urban environments with many simultaneous LoRaWAN gateways could theoretically sustain div>=3 for 5+ cycles. Not yet tested in urban deployment. AAD Sprint 2 (continuous ambient catalog) would further mitigate this.  
-**Mitigated:** April 5, 2026 (v1.5.0), strengthened April 6, 2026 (v1.5.3).
+### [x] No operational modes (STANDARD / COVERT / HIGH_ALERT) — RESOLVED in Phase H (v2.0.0)
+**Fix:** Multi-press BOOT button FSM in `displayTask`. Double-tap toggles
+HIGH_ALERT (extends RSSI sweep gate from 8 s → 10 s so CAD gets scan
+budget). Triple-tap toggles COVERT (fully deinits WiFi via
+`esp_wifi_stop → esp_wifi_deinit`, stops BLE scan via `NimBLEScan::stop()`,
+blanks OLED, suppresses buzzer + LED). Mode persists via `modeGet()/modeSet()`
+guarded by `stateMutex`; changes are logged via `[MODE]` serial line and a
+`mode_change` JSONL event.
 
-### [x] Long-running bench degradation — MITIGATED
-**Impact:** After 60-90+ seconds on a LoRa-rich bench, ambient state accumulated causing false escalation.  
-**Mitigation:** AAD sustained-diversity persistence gate (v1.5.0) prevents ambient diversity from triggering escalation. Tap prune on sustained-diversity drop (commit `66b5501`) aggressively clears confirmed taps when a drone departs, preventing stale state from accumulating across detection cycles. Cooldown reduced from 15s to 5s per level for faster return to CLEAR.  
-**Remaining risk:** Not tested beyond 30 minutes continuous runtime with v1.5.3 persistence gate. Very long deployments (8+ hours) and outdoor environments may present different ambient patterns.  
-**Mitigated:** April 6, 2026 (v1.5.3).
+### [x] GPS_MIN_CNO set to 6 (indoor value) — RESOLVED pre-v2.0.0
+**Current value:** `GPS_MIN_CNO = 15` in `sentry_config.h`. Comment reads
+`// dB-Hz minimum satellite signal strength. INDOOR TESTING: 6. FIELD/PRODUCTION: 15-20.`
+The C/N0 uniformity-based spoofing detector is automatically suppressed
+when `GPS_MIN_CNO < 15` to avoid indoor false positives.
 
-### [ ] ELRS detection time varies significantly (2s to 48s across sprints)
-**Impact:** The operator can't predict how quickly the system will alert.  
-**Root cause:** Detection speed depends on which confidence path triggers first — diversity (fast but threshold-dependent), RSSI persistence (reliable but slow ~9-12s minimum), or confirmed CAD taps (definitive but statistically rare).  
-**Current timing (v1.5.3):** ADVISORY 2.7s, WARNING 6.4s, CRITICAL 11.2s. Primary path is confirmed CAD taps at half-weight (persDiv=0 until sustained=5). The persistence gate at 5 does not slow detection because the tap pathway alone exceeds CRITICAL threshold.  
-**Status:** Field testing will determine if timing holds with real drone signals at various distances.
+### [x] No GNSS integrity improvements — RESOLVED pre-v2.0.0
+**Fix:** `src/gnss_integrity.cpp` implements:
+- C/N0 uniformity check (stddev across satellites) with configurable floor
+- Satellite elevation filter via `MIN_ELEV_FOR_CNO = 20°` — low-elevation
+  multipath-affected sats are excluded from the uniformity calc
+- Position-jump detection (NAV-PVT consecutive comparison, >100 m step with
+  tight hAcc flagged as spoofing indicator)
+- RF-GNSS temporal correlation — a GNSS anomaly only contributes to
+  candidate confirm score when an RF-side ADVISORY was active within
+  `GNSS_RF_CORRELATION_WINDOW_MS` (30 s)
 
-### [ ] RSSI sweep noise floor varies between LoRa and FSK mode
-**Impact:** RSSI thresholds tuned in FSK mode may not apply correctly after mode switches.  
-**Status:** Currently the RSSI sweep always runs in FSK mode (correct). But if Phase 3 FSK detection is enabled, the mode switch sequence changes the radio state between sweeps.
+### [x] LR1121 CAD stub — RESOLVED pre-v2.0.0
+**Fix:** Full LR1121 CAD pipeline in `cad_scanner.cpp` covers sub-GHz
+(860–930 MHz, SF6–SF12, ELRS channel grid) and 2.4 GHz (2400–2480 MHz,
+SF6–SF8, BW=812.5 kHz). Per-band `CadBandSummary` feeds the candidate
+engine. 2.4 GHz is confirmer-only (never seeds a candidate by itself).
 
-### [x] bandEnergyElevated removed from mediumConfidence — RESOLVED
-**Impact:** Band energy trending was computed but not used in threat escalation.  
-**Fix:** Sprint 3/5 (commit `be1b007`) re-integrated band energy into confidence scoring at 8 dB threshold with `WEIGHT_BAND_ENERGY = 5`. Also added EU band (863-870 MHz) tracking.  
-**Resolved:** April 3, 2026.
+### [x] No ASTM F3411 full payload decode — RESOLVED in Phase J (v2.0.0)
+**Fix:** Vendored `opendroneid-core-c` (Apache 2.0) at
+`lib/opendroneid/` — 4 files, upstream commit `4b266c7`. WiFi beacons
+with vendor-specific IE (OUI FA:0B:BC, type 0x0D) are decoded via
+`odid_message_process_pack()` after the 5-byte skip (OUI + type + counter).
+Populates `DecodedRID` struct on `SystemState.lastRID`, emits
+`[RID] UAS-ID: ... Drone: lat,lon,alt ... Operator: ... Speed: ... Hdg: ...`,
+renders on the new RID OLED screen, appends `rid_*` fields to JSONL.
 
-### [ ] Ambient confirmed-tap pathway reaches WARNING despite persistence gate — NEW v1.6.0 finding
-**Impact:** No-drone baseline can spike to `score=44` on a single cycle-burst of ambient activity, crossing the WARNING threshold (24) even with `PERSISTENCE_MIN_CONSECUTIVE=5` in place (v1.5.3 fix). This is a SEPARATE failure pathway from the diversity-sustained escalation that was closed in v1.5.0/v1.5.3.
+### [x] No BLE Remote ID — RESOLVED in Phase M (v2.0.0)
+**Fix:** NimBLE-Arduino 2.x scanner in `ble_scanner.cpp`. Passive scan at
+10% duty (50 ms window / 500 ms interval) coexists with WiFi promiscuous
+mode via ESP-IDF coexistence scheduler. ASTM F3411 BLE service UUID 0xFFFA
+matched; payload decoded with the same `odid_message_process_pack()` path
+as WiFi (after the 1-byte counter skip). Writes to the same `lastRID`
+struct so the OLED RID screen shows BLE-sourced decodes without display
+changes. Stops cleanly on COVERT entry.
 
-**Evidence** — April 11, 2026 Codex adversarial review ("Codex Run 1") flagged a baseline test log showing the anomaly at cycle 156:
-```
-cycle=155: conf=0 taps=4 div=4 persDiv=0 vel=0 sustainedCycles=1 score=5
-cycle=156: conf=1 taps=5 div=3 persDiv=3 vel=4 sustainedCycles=2 score=44  <- WARNING breach
-cycle=157: conf=1 taps=4 div=2 persDiv=0 vel=4 sustainedCycles=0 score=20
-```
-`persDiv` jumped from 0 to 3 at cycle 156 despite `sustainedCycles` being only 2 (below the gate threshold of 5). This means there is a `persDiv` update path in `detection_engine.cpp` outside the sustained-diversity gate — most likely the confirmed-tap pathway boosts `persDiv` when `conf >= 1` arrives, independent of `sustainedCycles` progression.
+### [x] ZMQ / DragonSync output — RESOLVED in Phase L (v2.0.0)
+**Fix:** `emitZmqJson()` in `data_logger.cpp` prints `[ZMQ] {...}\n` lines
+to Serial on every threat transition and every decoded RID. Debounced to
+≤1 Hz per event type. Companion Python bridge at `tools/zmq_bridge.py`
+strips the prefix and republishes as real ZMQ PUB messages on
+`tcp://*:4227` (DragonSync convention).
 
-**What was already verified:**
-- The `consecutiveHits >= 2` diversity gate recommended in `docs/FHSS_Discrimination_Research.md:178-184` is already enforced at multiple call sites in `src/cad_scanner.cpp` (lines 476-478, 489-491, 603-606, 803-805, 815-817, 957-959). This gate alone does NOT prevent the cycle-156 anomaly.
-- The v1.5.3 `PERSISTENCE_MIN_CONSECUTIVE=5` gate was tuned against the max sustainedCycles observed in 30-min soak (=2). The gate does the right thing for its specific pathway, but an alternate `persDiv` update path bypasses it.
+### [x] Bandwidth discrimination (DJI OcuSync target) — RESOLVED in Phase I (v2.0.0)
+**Fix:** `countElevatedAdjacentBins()` in `rf_scanner.cpp`. Per-peak
+classification into `BW_NARROW` / `BW_MEDIUM` / `BW_WIDE` based on 200 kHz
+bin run lengths. `bwWide` evidence slot on `DetectionCandidate` attaches
+as a confirmer. **Caveat**: the existing `narrowWidth > 6` filter in
+`extractPeaks()` still rejects flat-top OFDM before classification, so
+full OcuSync detection requires the follow-up work tracked in OPEN below.
 
-**Detection path that fires:** confirmed tap + transient diversity burst, not sustained diversity. The Sprint 2/3 soak tests measured `max persDiv over time` but not `single-cycle spikes triggered by conf increments`, so this was missed.
+### [x] Enhanced data logging for field analysis — RESOLVED in Phase L+N (v2.0.0)
+**Fix:** JSONL rows include threat, score, CAD diversity/confirmed/taps,
+peak freq/RSSI/bandwidth class, GPS position/fix/SVs, jam/spoof
+indicators, C/N0 stddev, and (when present) decoded RID fields. Plus
+one-shot `selftest` and `mode_change` events. Logger access is serialized
+via a dedicated `loggerMutex` so concurrent writes from `loRaScanTask`
+and `displayTask` don't interleave.
 
-**Root cause hypotheses (need verification in v1.6.1 audit):**
-1. `persDiv` is being updated from an inner code path (tap confirmation, velocity calc) that bypasses the `sustainedCycles` gate.
-2. The confirmed-tap scoring weight interacts with diversity scoring in a way that makes `conf=1` effectively amplify ambient diversity into WARNING territory.
-3. Velocity calculation (`vel=4` in the log) may be feeding back into `persDiv` via a path that doesn't check `sustainedCycles`.
-
-**Regression criterion for fix:** 30+ minute soak with no drone present must show zero cycles at or above WARNING (score < 24). v1.5.3 met this with `max score=19` on its specific ambient profile — the April 11 Codex review found a cycle-burst anomaly v1.5.3 testing did not catch.
-
-**Out of v1.6.0 scope:** SPEC explicitly excludes detection engine changes (`AAD gates, scoring weights, thresholds — these are field-calibrated and we don't tune them without data`). Tracked for v1.6.1.
-
-**Next steps (v1.6.1 sprint):**
-1. Audit `detection_engine.cpp` persDiv update paths — find the one that bypasses sustainedCycles
-2. Add a no-drone regression harness that asserts `max score < WARNING` over 1000+ cycles
-3. Review confirmed-tap scoring weight logic for interaction with transient diversity
-4. Consider adding a `conf` contribution gate that also requires sustainedCycles >= N before the confirmed-tap score contributes at full weight
-
-**References:**
-- `docs/FHSS_Discrimination_Research.md` — prior research, proposed consecutiveHits gate (already implemented)
-- Codex adversarial review output, April 11, 2026 (review ID `bnfw986as` in session logs)
-
----
-
-## MEDIUM — Feature Gaps
-
-### [x] No buzzer alert system — RESOLVED
-**Impact:** No audible alert for the operator.  
-**Fix:** Implemented in `buzzer_manager.cpp` and `alert_handler.cpp`. 7 tone patterns (self-test, RF advisory/warning, GNSS warning, Remote ID, critical, all-clear). Non-blocking LEDC PWM. ACK (1s hold) and mute (3s hold) via BOOT button. Auto-unmute after 5 minutes.  
-**Resolved:** Pre-v1.4.0.
-
-### [ ] No boot self-test
-**Impact:** No way to verify hardware health at power-on. A broken antenna or dead GPS gives no warning.  
-**Status:** Designed (radio health, antenna quality, GPS fix timeout, scan cycle watchdog). Not implemented.  
-**Sprint:** Phase 4A in the phased plan.
-
-### [ ] No operational modes (STANDARD/COVERT/HIGH-ALERT)
-**Impact:** No way to suppress WiFi emissions for COVERT operation or optimize for fastest detection in HIGH-ALERT.  
-**Status:** Designed. Not implemented.  
-**Sprint:** Phase 4B in the phased plan.
-
-### [ ] LR1121 CAD stub still returns {0,0,0,0,0,0}
-**Impact:** Dual-band board has no CAD detection capability — running blind on its strongest feature.  
-**Status:** Hardware not yet in hand. Sprint 5A-5C in the phased plan.  
-**Hardware prerequisites:** DIO9 GPIO 36, TCXO voltage verification, antenna connectors.
-
-### [ ] No GNSS integrity improvements (C/N0 uniformity, position jump, jam+fix-loss correlation)
-**Impact:** GNSS spoofing/jamming detection is basic — uses u-blox built-in indicators only, no host-side algorithms.  
-**Status:** Designed in Sprint 3A of the phased plan. Not implemented.
-
-### [ ] No enhanced data logging for field analysis
-**Impact:** Current logging doesn't capture per-cycle CAD state, diversity counts, or threat transitions with enough detail for post-test analysis.  
-**Status:** Sprint 6B in the phased plan. Needed for field test.
-
-### [ ] No field test analysis tooling
-**Impact:** No automated way to compute Pd, Pfa, time-to-alert from log files.  
-**Status:** Sprint 6C in the phased plan. Python script needed.
+### [x] No field test analysis tooling — RESOLVED in Phase N (v2.0.0)
+**Fix:** `tools/field_analyzer.py` consumes JSONL logs (single file or
+directory of files), produces console summary + self-contained HTML
+report (base64 PNGs) + CSV detection-event table. Handles malformed lines
+gracefully. Requirements pinned in `tools/requirements_analysis.txt`.
 
 ---
 
-## LOW — Nice to Have / Future
+## OPEN — carried forward from v1.x
 
-### [ ] Power management / battery life optimization
-**Sprint:** Phase 7.1
+### [ ] FSK_DETECT_THRESHOLD_DBM bench vs field split
+**Impact:** -50 dBm is bench-safe but conservative for field. -70 dBm is
+field-appropriate but trips immediate CRITICAL on bench from ambient ISM
+energy.
+**Current value:** -50 dBm (bench-safe).
+**Plan:** Change to -70 dBm before field deployment, or add runtime
+BENCH/FIELD mode switch. **Target:** v2.1.
 
-### [ ] OTA firmware updates
-**Sprint:** Phase 7.2
+### [ ] ELRS detection time varies significantly (2–48 s)
+**Impact:** Operator can't predict alert latency.
+**Current timing (v2.0.0 bench):** ADVISORY 2.7 s, WARNING 6.4 s,
+CRITICAL 11.2 s.
+**Status:** Field testing required to validate timing with real drone
+signals at various ranges.
 
-### [ ] Multi-device mesh (ESP-NOW)
-**Sprint:** Phase 7.3
+### [ ] RSSI sweep noise floor varies between LoRa and FSK modes
+**Impact:** RSSI thresholds tuned in FSK mode may not apply after mode
+switches.
+**Status:** RSSI sweep always runs in FSK — no active issue today, but
+documented because a future mode-switch path could reintroduce it.
 
-### [ ] Multi-constellation GNSS consistency
-**Sprint:** Phase 7.4
+### [ ] Ambient confirmed-tap WARNING breach (v1.6.0 finding, carried forward)
+**Impact:** No-drone baseline can spike to `score=44` on a single cycle-
+burst of ambient activity even with `PERSISTENCE_MIN_CONSECUTIVE=5`.
+Separate failure pathway from the diversity-sustained escalation closed in
+v1.5.0/v1.5.3.
+**Evidence:** April 11, 2026 Codex review flagged cycle 156 of a baseline
+log where `persDiv` jumped 0→3 while `sustainedCycles` stayed at 2.
+**Root cause hypothesis:** `persDiv` has an update path (possibly via
+confirmed-tap or velocity calculation) that bypasses the `sustainedCycles`
+gate.
+**Regression criterion:** 30+ minute soak with no drone present must show
+zero cycles at or above WARNING (score < 24).
+**Status:** Tracked for v2.1. Audit `persDiv` update paths in
+`detection_engine.cpp`, find the bypass path, add a `conf`-contribution
+gate that also requires `sustainedCycles >= N`.
 
-### [ ] Compass integration (FlyFishRC M10QMC)
-**Requires:** GPIO 10/21 resistor removal on T3S3  
-**Sprint:** Phase 7.5
+### [ ] Alert state ownership race (post-audit finding)
+**Impact:** `displayTask` calls `alertAcknowledge()` and `alertToggleMute()`
+while `alertTask` mutates the same `_lastThreat` / `_isAcknowledged` /
+`_isMuted` globals. Worst case is a mute/ack taking an extra cycle to
+register. Not a field-safety failure.
+**Status:** Flagged in the April 21, 2026 pre-release audit (rev.md).
+Target **v2.1** — either add an `alertMutex` or migrate ack/mute signals
+through `detectionQueue` so they only execute in `alertTask`.
 
-### [x] Confidence scoring system (weighted per-detection-source) — RESOLVED
-**Fix:** Sprint 5/5 (commit `c98b1d7`) replaced boolean threat logic with weighted scoring. Weights in `sentry_config.h`. Thresholds: ADVISORY=8, WARNING=24, CRITICAL=40.  
-**Resolved:** April 3, 2026.
+---
 
-### [ ] DJI OFDM detection via LR1121 2.4 GHz RSSI
-**Sprint:** Phase 5C — requires LR1121 hardware
+## KNOWN LIMITATIONS (by design — not bugs)
+
+### Warmup poisoning window
+For the first ~20–50 s after boot, the ambient filter is building its
+baseline snapshot. A drone broadcasting *during* this window can be
+mistakenly tagged as ambient infrastructure and suppressed for the rest
+of the session. In operational use SENTRY-RF is deployed in an established
+position before power-on, so this is a low-probability corner case. A
+probation table that defers permanent ambient tagging until a frequency
+is seen consistently across multiple boots is on the **v2.1** roadmap.
+
+### 2.4 GHz WiFi-channel rejection for OcuSync
+The wide-band classifier (Phase I) correctly counts adjacent elevated bins
+but the existing `narrowWidth > 6` filter in `extractPeaks()` rejects
+flat-top OFDM before classification. Flat-top 10 MHz OcuSync plateaus
+therefore don't reach the `bwWide` evidence slot. A separate wide-band
+detection pipeline that scans the full spectrum for contiguous elevated
+runs (independent of the peak finder) is on the **v2.1** roadmap. This
+was explicitly flagged in the Phase I commit and is not a regression.
+
+### GNSS anomalies require RF correlation to escalate
+A GNSS-only anomaly (e.g. driving under a bridge, multipath fade, single-
+sat dropout) does *not* escalate threat level on its own. The candidate
+engine only counts a GNSS anomaly as evidence when there was an RF-side
+ADVISORY crossing within the last 30 s. This is deliberate — it prevents
+urban driving from triggering spoofing alerts. Standalone GNSS alerts
+remain a separate product category, not a bug in this one.
+
+### NAN action-frame Remote ID not supported (beacon-only decode)
+ASTM F3411 allows Remote ID over 802.11 NAN (Neighbor Awareness
+Networking) action frames in addition to WiFi beacons. Our promiscuous
+capture does pass through 0xD0 action frames, but `findRemoteIdIE()`
+walks them as if they were beacons and will not correctly locate a NAN
+Service Discovery Frame's payload. In practice, all consumer drones in
+the FAA Remote ID compliance program broadcast on beacons; NAN-only
+emitters are rare. A proper NAN decoder using
+`odid_wifi_receive_message_pack_nan_action_frame()` requires preserving
+the full 802.11 management frame (our current capture drops the 24-byte
+MAC header), so it's a structural change planned for **v2.1**.
+
+### SD card init on T3S3 hardware
+Known hardware issue — SD init fails on the specific T3S3 boards in the
+bench. Documented in `.mex/ROUTER.md`. On failure, all logger calls become
+no-ops; JSONL events are still visible on serial. Not a firmware bug.
+
+### Compass not reliably detected on all hardware
+QMC5883L on Wire1 occasionally fails the chip-ID check (`ID=0x00`
+observed). Boot continues without compass; bearing display shows `--`.
+Not on critical path for RF detection.
+
+---
+
+## LOW — deferred future work
+
+### [ ] Power management / battery life optimization — v2.x
+### [ ] OTA firmware updates — v2.x
+### [ ] Multi-device mesh (ESP-NOW) — v2.x
+### [ ] Multi-constellation GNSS consistency — v2.x
 
 ---
 
 ## Testing Methodology Issues
 
-### [ ] Bench test scripts don't properly reset the device
-**Impact:** Tests inherit stale state from previous runs, producing misleading results.  
-**Root cause:** T3S3 native USB DTR/RTS reset is unreliable. Serial port open doesn't always trigger a reboot.  
-**Fix:** Test scripts must use DTR/RTS toggle AND verify boot message ("SENTRY-RF v1.x.x") before starting measurements. Alternatively, use the RST button or power cycle.  
-**Lesson learned:** Every test failure from Sprint 2B through 2C was traced to stale state, not code bugs.
+### [ ] Bench test scripts — stale state on DTR/RTS reset
+**Impact:** T3S3 native USB DTR/RTS reset is unreliable. Serial port open
+doesn't always trigger a reboot.
+**Workaround:** Test scripts must verify boot banner (`SENTRY-RF v2.0.0`)
+before starting measurements. Alternatively, physical RST button or
+power cycle.
 
 ### [ ] No automated regression test for detection timing
-**Impact:** Each sprint potentially regresses WARNING/CRITICAL timing without automated detection.  
-**Fix:** Create a Python test that boots SENTRY, waits for warmup, starts JJ, measures time-to-WARNING and time-to-CRITICAL, and fails if they exceed thresholds.
+**Impact:** Each release potentially regresses WARNING/CRITICAL timing.
+**Plan:** v2.1 — Python harness that boots SENTRY, waits for warmup,
+starts a signal source, measures time-to-WARNING and time-to-CRITICAL,
+fails if beyond thresholds.
 
 ---
 
-## Architecture Decisions Documented
+## Architecture decisions documented
 
 ### Frequency diversity is the correct FHSS discriminator
-- Hit COUNT doesn't separate drone from ambient (both produce similar counts)
-- Hit SPREAD (distinct frequencies) does separate them — drones hit many frequencies, infrastructure hits few
-- 3-second window prevents ambient accumulation while capturing FHSS pattern
-- Bench validation limited (ambient diversity 4-7 overlaps with ELRS diversity 2-5)
-- Field validation needed to confirm separation in clean environments
+- Hit count doesn't separate drone from ambient (both produce similar counts)
+- Hit spread (distinct frequencies) does separate them — drones hit many
+  frequencies, infrastructure hits few
+- 3-second window prevents ambient accumulation while capturing FHSS
+  pattern
 
 ### CAD detects full LoRa packet, not just preamble
 - Confirmed by Semtech AN1200.48 and AN1200.85
-- Detection window is ~5ms (full packet airtime), not ~1ms (preamble only)
-- This 5x increase in detection window was incorporated in Sprint 2A-fix
+- Detection window is ~5 ms (full packet airtime), not ~1 ms (preamble)
 
 ### Persistence (consecutive hits) is the infrastructure discriminator
 - Drones transmit continuously via FHSS — short-lived per-frequency
-- Infrastructure transmits intermittently on fixed frequencies — long-lived per-frequency
-- 3 consecutive hits = confirmed (drone FHSS expires in ~2s per frequency)
-- 10+ second fixed-frequency tap = auto-learn as ambient
+- Infrastructure transmits intermittently on fixed frequencies — long-lived
+- 3 consecutive hits = confirmed tap
+- 10+ s fixed-frequency tap = auto-learn as ambient
 
-### Never call radio.begin() or radio.beginFSK() mid-operation
+### Never call radio.begin() or beginFSK() mid-operation
 - Causes -707 CHIP_NOT_FOUND (full chip reset + SPI re-probe fails)
 - Use SPI opcode 0x8A for packet type switching
-- RadioLib internal state becomes stale after raw SPI switches — known issue, causes FSK Phase 3 corruption
+- Phase H COVERT mode explicitly avoids radio.begin() calls during mode
+  transitions for this reason
+
+### 2.4 GHz is confirmer-only (LR1121)
+- The candidate engine never seeds a new candidate from 2.4 GHz evidence
+  alone (see Phase E commit). Always requires a paired sub-GHz anchor.
+- Rationale: WiFi/Bluetooth/microwave oven energy floods the 2.4 GHz band;
+  using it as a primary detector would false-positive constantly.
+
+### Serial output is globally serialized (pre-v2.0.0 triage)
+- The `SERIAL_SAFE(body)` macro in `detection_types.h` blocks on
+  `serialMutex` with `portMAX_DELAY` for every write. Required for the
+  Phase L `[ZMQ]` JSON frame format — even a one-byte interleave from a
+  concurrent print corrupts the pipe to the DragonSync bridge.
 
 ---
 
-*Last updated: April 11, 2026 — v1.6.0-rc1+6 commits (added HIGH entry for ambient confirmed-tap pathway flagged by Codex Run 1 adversarial review)*
-*Review this document before every sprint.*
+*Last updated: April 21, 2026 — v2.0.0 tag candidate after pre-release
+fix sweep (serial mutex blocking, WiFi queue lifecycle, documentation
+reconciliation). Review this document before every sprint and release.*

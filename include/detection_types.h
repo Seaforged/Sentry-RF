@@ -129,14 +129,18 @@ extern QueueHandle_t     detectionQueue;
 // Usage:
 //   SERIAL_SAFE(Serial.printf("[CAND] raw=%s ...", threatName(...)));
 //
-// The macro arg is a statement; commas inside the printf's own argument
-// list are protected by the inner parens, so macro-argument splitting is
-// not a problem. Safe to use before serialMutex is created (pre-task
-// setup code) — falls through to an unprotected call.
+// Blocks until mutex available — safe to call from any task. ZMQ pipe
+// integrity requires no unprotected Serial.printf anywhere; the previous
+// short-timeout variant fell back to unprotected printing under contention
+// and could still corrupt lines. Now we block with portMAX_DELAY so every
+// print is serialized.
+//
+// Pre-task setup code (before serialMutex is created) skips the take/give
+// and prints directly; that path is single-threaded so no race is possible.
 #define SERIAL_SAFE(body)                                                    \
     do {                                                                     \
-        if (serialMutex &&                                                   \
-            xSemaphoreTake(serialMutex, pdMS_TO_TICKS(20)) == pdTRUE) {      \
+        if (serialMutex != nullptr) {                                        \
+            xSemaphoreTake(serialMutex, portMAX_DELAY);                      \
             body;                                                            \
             xSemaphoreGive(serialMutex);                                     \
         } else {                                                             \
