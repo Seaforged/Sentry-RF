@@ -5,6 +5,7 @@
 #include "board_config.h"
 #include "sentry_config.h"
 #include "data_logger.h"
+#include "alert_handler.h"   // Issue 8: alertQueueDropInc()
 #include <Arduino.h>
 #include <string.h>
 #include <NimBLEDevice.h>
@@ -254,7 +255,9 @@ void bleScanTask(void* param) {
         ev.timestamp = millis();
         snprintf(ev.description, sizeof(ev.description),
                  "BLE-RID %s", rid.uasID);
-        xQueueSend(detectionQueue, &ev, 0);
+        if (xQueueSend(detectionQueue, &ev, pdMS_TO_TICKS(5)) != pdTRUE) {
+            alertQueueDropInc();
+        }
 
         // Phase L: publish the decoded RID via the ZMQ bridge line.
         if (haveSnap) emitZmqJson(snap, "rid");

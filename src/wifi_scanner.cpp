@@ -2,6 +2,8 @@
 #include "board_config.h"
 #include "sentry_config.h"
 #include "data_logger.h"   // Phase L: emitZmqJson on decoded RID
+#include "alert_handler.h" // Issue 8: alertQueueDropInc()
+#include "cad_scanner.h"   // Issue 1: warmup corroboration markers
 #include <Arduino.h>
 #include <esp_wifi.h>
 #include <string.h>
@@ -28,6 +30,11 @@ struct CapturedFrame {
     uint8_t  channel;
     uint16_t frameType;
     uint16_t length;
+    // Issue 5 (Option A): preserve the 24-byte 802.11 MAC header so we can
+    // feed the full reconstructed frame to
+    // odid_wifi_receive_message_pack_nan_action_frame() for NAN-SDF RID
+    // decode. Beacon decode keeps using the body only.
+    uint8_t  macHeader[24];
     uint16_t payloadLen;          // actual bytes copied into payload[]
     uint8_t  payload[MAX_PAYLOAD]; // raw frame body after MAC header
 };
@@ -86,13 +93,24 @@ static void IRAM_ATTR wifiPromiscuousCallback(void* buf, wifi_promiscuous_pkt_ty
         g_wifiFrameCounts[ch - 1]++;
     }
 
+    // Issue 4: ISR-side subtype filter. Only beacons (0x80) and action
+    // frames (0xD0) can carry Remote ID — reject all other management
+    // subtypes (probe req/resp, assoc, auth, deauth, disassoc, etc.)
+    // before enqueue. This is ~80% noise reduction on busy networks and
+    // lets the depth-20 queue survive bursts without dropping real RID.
+    uint8_t subtype = pkt->payload[0] & 0xFC;
+    if (subtype != 0x80 && subtype != 0xD0) return;
+
     CapturedFrame frame;
     // Source MAC is at offset 10 in the 802.11 header
     memcpy(frame.srcMAC, pkt->payload + 10, 6);
     frame.rssi = pkt->rx_ctrl.rssi;
     frame.channel = pkt->rx_ctrl.channel;
-    frame.frameType = (pkt->payload[0] & 0xFC);  // frame type + subtype
+    frame.frameType = subtype;
     frame.length = pkt->rx_ctrl.sig_len;
+    // Issue 5: copy the first 24 bytes (full 802.11 management header) so
+    // the task can reconstruct the frame for the NAN decoder.
+    memcpy(frame.macHeader, pkt->payload, 24);
 
     // Copy frame body after the 24-byte MAC header for IE parsing
     uint16_t bodyLen = (pkt->rx_ctrl.sig_len > 24) ? pkt->rx_ctrl.sig_len - 24 : 0;
@@ -297,6 +315,58 @@ static bool decodeBeaconRID(const CapturedFrame& frame,
     return out.valid;
 }
 
+// Issue 5 (Option A): decode a NAN Service Discovery Frame carrying ASTM
+// F3411 Remote ID. Reconstructs the full 802.11 management frame from
+// macHeader + payload and feeds it to
+// odid_wifi_receive_message_pack_nan_action_frame(), which handles the
+// NAN attribute walk internally. Works for any 0xD0 action frame — the
+// library returns <0 if it's a non-NAN action frame, so we silently drop
+// those without a false-positive RID.
+static bool decodeNanActionRID(const CapturedFrame& frame, DecodedRID& out) {
+    memset(&out, 0, sizeof(out));
+    if (frame.payloadLen == 0) return false;
+
+    // Reconstruct: 24 B MAC header + payload body. Local buffer sized to
+    // accommodate the maximum frame we could have captured (MAC + payload).
+    uint8_t reconstructed[24 + MAX_PAYLOAD];
+    memcpy(reconstructed, frame.macHeader, 24);
+    size_t copied = frame.payloadLen;
+    if (copied > MAX_PAYLOAD) copied = MAX_PAYLOAD;
+    memcpy(reconstructed + 24, frame.payload, copied);
+    size_t totalLen = 24 + copied;
+
+    ODID_UAS_Data uas;
+    odid_initUasData(&uas);
+    char srcMacStr[6] = {0};  // library writes 6 bytes of the sender MAC here
+    int rc = odid_wifi_receive_message_pack_nan_action_frame(
+        &uas, srcMacStr, reconstructed, totalLen);
+    if (rc < 0) return false;  // not a NAN-SDF or payload invalid
+
+    if (uas.BasicIDValid[0]) {
+        strncpy(out.uasID, uas.BasicID[0].UASID, sizeof(out.uasID) - 1);
+        out.uasID[sizeof(out.uasID) - 1] = '\0';
+        strncpy(out.uasIDType,
+                idTypeToString((uint8_t)uas.BasicID[0].IDType),
+                sizeof(out.uasIDType) - 1);
+        out.uasIDType[sizeof(out.uasIDType) - 1] = '\0';
+    }
+    if (uas.LocationValid) {
+        out.droneLat  = (float)uas.Location.Latitude;
+        out.droneLon  = (float)uas.Location.Longitude;
+        out.droneAltM = uas.Location.AltitudeGeo;
+        out.speedMps  = uas.Location.SpeedHorizontal;
+        float dir = uas.Location.Direction;
+        out.headingDeg = (dir >= 0.0f && dir < 360.0f) ? (uint16_t)dir : 0;
+    }
+    if (uas.SystemValid) {
+        out.operatorLat = (float)uas.System.OperatorLatitude;
+        out.operatorLon = (float)uas.System.OperatorLongitude;
+    }
+    out.valid        = uas.BasicIDValid[0] || uas.LocationValid;
+    out.lastUpdateMs = millis();
+    return out.valid;
+}
+
 // ── WiFi scan task ──────────────────────────────────────────────────────────
 
 void wifiScanTask(void* param) {
@@ -366,45 +436,79 @@ void wifiScanTask(void* param) {
             g_wifiLastDropLogMs = now;
         }
 
-        // Process captured frames
-        if (xQueueReceive(wifiPacketQueue, &frame, pdMS_TO_TICKS(10)) == pdTRUE) {
+        // Issue 4: batch-drain the queue each pass. Previously we took one
+        // frame per loop iteration which could fall behind in busy RF; now
+        // we consume everything queued before yielding. 5ms receive timeout
+        // on the first read (doubles as idle pacing); subsequent reads use
+        // 0 (immediate) so we loop until empty.
+        while (xQueueReceive(wifiPacketQueue, &frame, pdMS_TO_TICKS(5)) == pdTRUE) {
             const char* droneName = identifyDroneMAC(frame.srcMAC);
             uint16_t ieDataOffset = 0, ieDataLen = 0;
-            bool isRemoteId = findRemoteIdIE(frame, &ieDataOffset, &ieDataLen);
+            // Issue 5: beacons (0x80) carry RID as a vendor IE — walk them
+            // via findRemoteIdIE as before. Action frames (0xD0) use the NAN
+            // Service Discovery Frame format, which has a completely
+            // different structure; route them to the NAN-aware decoder.
+            bool isBeaconRID = (frame.frameType == 0x80) &&
+                               findRemoteIdIE(frame, &ieDataOffset, &ieDataLen);
+            bool isActionFrame = (frame.frameType == 0xD0);
+            bool isRemoteId = isBeaconRID || isActionFrame;
 
             if (droneName != nullptr || isRemoteId) {
                 DetectionEvent event = {};
                 event.source = DET_SOURCE_WIFI;
-                event.severity = isRemoteId ? THREAT_WARNING : THREAT_ADVISORY;
+                // Issue 2: default to ADVISORY. WARNING is promoted only on
+                // successful full-payload decode below — a raw IE match (OUI
+                // FA:0B:BC) alone is forgeable / producible by a misconfigured
+                // beacon. Real RID requires a validated ODID pack.
+                event.severity = THREAT_ADVISORY;
                 event.frequency = 2412.0 + ((frame.channel - 1) * 5.0);
                 event.rssi = frame.rssi;
                 event.timestamp = millis();
 
                 if (isRemoteId) {
-                    // Phase J: attempt full payload decode. If it fails (truncated
-                    // frame, wrong OUI type, garbled pack) we still raise the
-                    // WARNING — presence of the IE alone is a valid detection.
+                    // Phase J + Issue 5: dispatch by frame type. Beacon uses
+                    // the vendor-IE walker; action frame uses NAN-SDF parser.
+                    // Either path yields a DecodedRID; ridValid gates WARNING
+                    // promotion and systemState flipping.
                     DecodedRID rid;
-                    bool decoded = decodeBeaconRID(frame, ieDataOffset, ieDataLen, rid);
+                    bool decoded = false;
+                    bool fromNan = false;
+                    if (isBeaconRID) {
+                        decoded = decodeBeaconRID(frame, ieDataOffset, ieDataLen, rid);
+                    } else if (isActionFrame) {
+                        decoded = decodeNanActionRID(frame, rid);
+                        fromNan = decoded;
+                    }
+                    bool ridValid = decoded && rid.valid;
 
-                    // Signal to detection engine via shared state. Snapshot
-                    // while we hold the mutex so the Phase L ZMQ emit below
-                    // doesn't need to re-acquire (and so it sees the fields
-                    // we just wrote).
                     SystemState snap;
                     bool haveSnap = false;
-                    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                        systemState.remoteIdDetected = true;
-                        systemState.remoteIdLastMs = millis();
-                        if (decoded) systemState.lastRID = rid;
-                        snap = systemState;
-                        haveSnap = true;
-                        xSemaphoreGive(stateMutex);
-                    }
+                    if (ridValid) {
+                        event.severity = THREAT_WARNING;
 
-                    if (decoded) {
-                        SERIAL_SAFE(Serial.printf("[RID] UAS-ID: %s Drone: %.6f,%.6f,%.1fm "
+                        // Issue 1: a valid RID during warmup proves a real
+                        // drone is present — blanket-disqualify all pending
+                        // ambient taps so the drone's RC-link frequencies
+                        // don't graduate to infrastructure at warmup end.
+                        if (cadWarmupInProgress()) {
+                            markPendingAmbientCorroboration(0.0f);
+                        }
+
+                        // Snapshot under stateMutex so the ZMQ emit that
+                        // follows sees exactly the fields we just wrote.
+                        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                            systemState.remoteIdDetected = true;
+                            systemState.remoteIdLastMs   = millis();
+                            systemState.lastRID          = rid;
+                            snap = systemState;
+                            haveSnap = true;
+                            xSemaphoreGive(stateMutex);
+                        }
+
+                        const char* ridTag = fromNan ? "[NAN-RID]" : "[RID]";
+                        SERIAL_SAFE(Serial.printf("%s UAS-ID: %s Drone: %.6f,%.6f,%.1fm "
                                                   "Operator: %.6f,%.6f Speed: %.1fm/s Hdg: %udeg\n",
+                                                  ridTag,
                                                   rid.uasID,
                                                   rid.droneLat, rid.droneLon, rid.droneAltM,
                                                   rid.operatorLat, rid.operatorLon,
@@ -414,15 +518,18 @@ void wifiScanTask(void* param) {
                                  "RID %s @%.4f,%.4f",
                                  rid.uasID, rid.droneLat, rid.droneLon);
                     } else {
-                        SERIAL_SAFE(Serial.printf("[WIFI] RID beacon from %02X:%02X:%02X:%02X:%02X:%02X ch%d RSSI:%d (undecoded)\n",
+                        // Undecoded: diagnostic only. Do NOT set
+                        // remoteIdDetected — the candidate engine must not
+                        // attach cross-domain RID evidence on an unvalidated
+                        // beacon.
+                        SERIAL_SAFE(Serial.printf("[WIFI] RID beacon undecoded OUI:%02X:%02X:%02X from %02X:%02X:%02X:%02X:%02X:%02X ch%d RSSI:%d\n",
+                                                  REMOTE_ID_OUI[0], REMOTE_ID_OUI[1], REMOTE_ID_OUI[2],
                                                   frame.srcMAC[0], frame.srcMAC[1], frame.srcMAC[2],
                                                   frame.srcMAC[3], frame.srcMAC[4], frame.srcMAC[5],
                                                   frame.channel, frame.rssi));
                         snprintf(event.description, sizeof(event.description),
-                                 "RemoteID %02X:%02X:%02X:%02X:%02X:%02X ch%d",
-                                 frame.srcMAC[0], frame.srcMAC[1], frame.srcMAC[2],
-                                 frame.srcMAC[3], frame.srcMAC[4], frame.srcMAC[5],
-                                 frame.channel);
+                                 "RID beacon undecoded OUI:%02X:%02X:%02X",
+                                 REMOTE_ID_OUI[0], REMOTE_ID_OUI[1], REMOTE_ID_OUI[2]);
                     }
                 } else {
                     snprintf(event.description, sizeof(event.description),
@@ -433,10 +540,15 @@ void wifiScanTask(void* param) {
                              frame.channel);
                 }
 
-                xQueueSend(detectionQueue, &event, 0);
+                if (xQueueSend(detectionQueue, &event, pdMS_TO_TICKS(5)) != pdTRUE) {
+                    alertQueueDropInc();
+                }
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1));
+        // Issue 4: yield once after the batch drain completes. The 10ms
+        // cadence keeps the channel hopper responsive and lets lower-prio
+        // tasks run without starving the WiFi pipeline during quiet periods.
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

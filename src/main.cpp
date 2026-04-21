@@ -161,29 +161,46 @@ static bool          gpsFixTimeoutLogged  = false;
 // this function must not call radio.begin() again (resetting mid-boot
 // corrupts chip state on both SX1262 and LR1121).
 static void runSelfTest() {
-    // ── Radio health: 10 RSSI reads @ 10ms. All -127.5 dBm exact means
-    // the chip clamped to the "no signal / error" sentinel across every
-    // sample — almost certainly a dead receiver. Anything else = healthy.
-    bool radioHealthy = false;
-    radio.setFrequency(915.0);
-#ifdef BOARD_T3S3_LR1121
-    radio.startReceive();
-#else
-    radio.startReceive();
-#endif
-    for (int i = 0; i < 10; i++) {
+    // ── Issue 10: Radio health. Dual check:
+    //   (a) API return codes — setFrequency failing is unambiguous hardware
+    //       failure; the chip either did not ack the SPI command or
+    //       refused an in-range frequency.
+    //   (b) RSSI variance across 5 frequencies spanning 70 MHz — a healthy
+    //       receiver sees at least a few dB of natural variation across the
+    //       sweep even in RF-quiet rooms. A stuck/clamped read returns the
+    //       same value everywhere (commonly -127.5 dBm on LR1121, but the
+    //       specific sentinel varies by silicon/temp).
+    bool apiFailed = false;
+    float probeRssi[5];
+    const float healthFreqs[] = { 860.0f, 880.0f, 900.0f, 915.0f, 930.0f };
+    for (int i = 0; i < 5; i++) {
+        if (radio.setFrequency(healthFreqs[i]) != RADIOLIB_ERR_NONE) {
+            apiFailed = true;
+            probeRssi[i] = 0.0f;
+            continue;
+        }
+        radio.startReceive();
         delay(10);
 #ifdef BOARD_T3S3_LR1121
-        float rssi = radio.getInstantRSSI();
+        probeRssi[i] = radio.getInstantRSSI();
 #else
-        float rssi = radio.getRSSI(false);
+        probeRssi[i] = radio.getRSSI(false);
 #endif
-        if (rssi > -127.4f || rssi < -127.6f) {   // not exactly -127.5
-            radioHealthy = true;
-        }
     }
+    // Variance test: max - min across the 5 probes must be >= 3.0 dB.
+    // A silently-broken RX returning a single clamped sentinel reads with
+    // 0 dB variance; a live RX sees ~5-15 dB of variation from ambient.
+    float minR =  1e6f, maxR = -1e6f;
+    for (int i = 0; i < 5; i++) {
+        if (probeRssi[i] < minR) minR = probeRssi[i];
+        if (probeRssi[i] > maxR) maxR = probeRssi[i];
+    }
+    float range = maxR - minR;
+    bool radioHealthy = (!apiFailed) && (range >= 3.0f);
     selfTestRadioOK = radioHealthy;
-    Serial.printf("[SELFTEST] Radio: %s\n", radioHealthy ? "OK" : "FAIL");
+    Serial.printf("[SELFTEST] Radio: %s (api_ok=%d range=%.1fdB)\n",
+                  radioHealthy ? "OK" : "FAIL",
+                  apiFailed ? 0 : 1, range);
 
     // ── Antenna coverage probe: 10 frequencies across 860-930 MHz. If
     // ALL read below ANTENNA_FLOOR_DBM (-130 dBm) the antenna path is
@@ -779,7 +796,11 @@ void setup() {
     // Create FreeRTOS primitives early — avoids mutex crash if setup() returns early
     stateMutex = xSemaphoreCreateMutex();
     serialMutex = xSemaphoreCreateMutex();
-    detectionQueue = xQueueCreate(10, sizeof(DetectionEvent));
+    // Issue 8: deepened from 10 to 32. Seven producer paths (RF sweep, WiFi,
+    // BLE, GNSS integrity ×2, candidate engine, mode-change path) can burst
+    // simultaneously on a real drone event; the old 10-slot queue dropped
+    // events under load. 32 × 96 B ≈ 3 KB — negligible against available SRAM.
+    detectionQueue = xQueueCreate(32, sizeof(DetectionEvent));
 
     // Hardware init — splash stays on screen during entire init sequence
     displayInit(oled);

@@ -138,6 +138,66 @@ static AmbientTap ambientTaps[MAX_AMBIENT_TAPS];
 static uint8_t ambientTapCount = 0;
 static uint16_t warmupCycleCount = 0;
 
+// Issue 1 (CRITICAL) — warmup probation table. Previously any active tap
+// during warmup was immediately tagged as ambient, which meant a drone
+// transmitting at boot became permanently invisible. The probation table
+// defers ambient tagging until warmup completes, and taps that picked up
+// FHSS-diversity / RID / GNSS corroboration during the window are
+// discarded from pending (treated as real detections) rather than
+// graduated to ambient.
+struct PendingAmbientTap {
+    float         freqMHz;
+    uint8_t       sf;
+    unsigned long firstSeenMs;
+    bool          hasCorroboration;
+    bool          active;
+};
+static PendingAmbientTap pendingAmbientTaps[MAX_AMBIENT_TAPS];
+static uint8_t pendingAmbientCount = 0;
+
+static void addPendingAmbient(float freq, uint8_t sf) {
+    // Dedup: already pending at this freq+sf → nothing to do.
+    for (int i = 0; i < MAX_AMBIENT_TAPS; i++) {
+        if (pendingAmbientTaps[i].active &&
+            pendingAmbientTaps[i].sf == sf &&
+            fabsf(pendingAmbientTaps[i].freqMHz - freq) <= AMBIENT_FREQ_TOLERANCE) {
+            return;
+        }
+    }
+    // Find a free slot (active==false).
+    for (int i = 0; i < MAX_AMBIENT_TAPS; i++) {
+        if (!pendingAmbientTaps[i].active) {
+            pendingAmbientTaps[i].freqMHz          = freq;
+            pendingAmbientTaps[i].sf               = sf;
+            pendingAmbientTaps[i].firstSeenMs      = millis();
+            pendingAmbientTaps[i].hasCorroboration = false;
+            pendingAmbientTaps[i].active           = true;
+            if (pendingAmbientCount < MAX_AMBIENT_TAPS) pendingAmbientCount++;
+            return;
+        }
+    }
+    // Table full: the drone-during-warmup attack surface is bounded by
+    // MAX_AMBIENT_TAPS entries; any further ambient candidates are just
+    // ignored until warmup completes.
+}
+
+void markPendingAmbientCorroboration(float freqMHz) {
+    for (int i = 0; i < MAX_AMBIENT_TAPS; i++) {
+        if (!pendingAmbientTaps[i].active) continue;
+        if (freqMHz <= 0.0f) {
+            // Broadcast: any RID or GNSS anomaly during warmup disqualifies
+            // every pending ambient (we don't know which freq the drone is
+            // actually hopping through in the CAD layer). Conservative —
+            // loses some infrastructure learning, but preserves detection.
+            pendingAmbientTaps[i].hasCorroboration = true;
+        } else if (fabsf(pendingAmbientTaps[i].freqMHz - freqMHz) <= CAND_ASSOC_SUB_MHZ) {
+            pendingAmbientTaps[i].hasCorroboration = true;
+        }
+    }
+}
+
+bool cadWarmupInProgress();   // forward decl (defined below)
+
 // ── Per-band tracker ─────────────────────────────────────────────────────
 // All state that used to be shared across sub-GHz and 2.4 GHz is now per-
 // band. Each tracker owns its own tap list, diversity slots, sustained-
@@ -289,6 +349,13 @@ static bool isAmbientFrequency(float freq, uint8_t sf) {
 
 static void recordDiversityHit(BandTracker& t, float freq, uint8_t sf) {
     unsigned long now = millis();
+
+    // Issue 1: FHSS diversity during warmup corroborates that THIS freq is
+    // a real drone (not infrastructure), so it must not graduate to ambient
+    // at warmup completion. Mark the matching pending entry.
+    if (!warmupComplete) {
+        markPendingAmbientCorroboration(freq);
+    }
 
     // Check if this frequency/SF already has a slot
     for (int i = 0; i < MAX_DIVERSITY_SLOTS; i++) {
@@ -588,6 +655,12 @@ static uint8_t fhssFlushSpread24() {
 
 bool cadWarmupComplete() {
     return warmupComplete;
+}
+
+// Issue 1: accessor used by wifi_scanner.cpp / gnss_integrity.cpp to gate
+// their markPendingAmbientCorroboration() calls.
+bool cadWarmupInProgress() {
+    return !warmupComplete;
 }
 
 bool cadHwFault() {
@@ -1226,16 +1299,38 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
                          && (ambientTapCount == 0);
         if (normalEnd || earlyExit) {
             warmupComplete = true;
-            // Take serialMutex once around the whole block so the line
-            // listing N ambient taps prints contiguously without other
-            // cores' output interleaving in the middle.
+
+            // Issue 1: graduate pending-ambient entries. Anything flagged
+            // as corroborated during the window (FHSS diversity, RID, GNSS)
+            // is a real detection — discard it from pending. Clean entries
+            // become true ambient via recordAmbientTap(false).
+            int graduated = 0;
+            int discarded = 0;
+            for (int i = 0; i < MAX_AMBIENT_TAPS; i++) {
+                if (!pendingAmbientTaps[i].active) continue;
+                if (pendingAmbientTaps[i].hasCorroboration) {
+                    discarded++;
+                } else {
+                    recordAmbientTap(pendingAmbientTaps[i].freqMHz,
+                                     pendingAmbientTaps[i].sf, false);
+                    graduated++;
+                }
+                pendingAmbientTaps[i].active = false;
+            }
+            pendingAmbientCount = 0;
+
+            // Take serialMutex once around the whole block so the summary
+            // listing lands contiguously without other cores interleaving.
             if (serialMutex &&
                 xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 if (earlyExit && !normalEnd) {
                     Serial.printf("[WARMUP] Early completion at %lus — clean environment. ",
                                   millis() / 1000);
                 }
-                Serial.printf("[WARMUP] Complete after %u cycles (%lus). %u ambient taps recorded:\n",
+                Serial.printf("[WARMUP] Complete. Graduated %d/%d pending taps as ambient "
+                              "(%d discarded — corroboration detected).\n",
+                              graduated, graduated + discarded, discarded);
+                Serial.printf("[WARMUP] After %u cycles (%lus). %u ambient taps active:\n",
                               warmupCycleCount, millis() / 1000, ambientTapCount);
                 for (uint8_t i = 0; i < ambientTapCount; i++) {
                     if (ambientTaps[i].active) {
@@ -1247,18 +1342,25 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
                 xSemaphoreGive(serialMutex);
             }
         } else {
+            // Issue 1: collect pending candidates — do NOT mark ambient yet.
             for (int i = 0; i < MAX_TAPS; i++) {
                 if (subGHzTracker.taps[i].active && !subGHzTracker.taps[i].isFsk) {
-                    recordAmbientTap(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf, true);
+                    addPendingAmbient(subGHzTracker.taps[i].frequency,
+                                      subGHzTracker.taps[i].sf);
                 }
                 if (band24Tracker.taps[i].active && !band24Tracker.taps[i].isFsk) {
-                    recordAmbientTap(band24Tracker.taps[i].frequency, band24Tracker.taps[i].sf, true);
+                    addPendingAmbient(band24Tracker.taps[i].frequency,
+                                      band24Tracker.taps[i].sf);
                 }
             }
         }
     }
 
-    // Post-warmup continuous ambient learning
+    // Post-warmup continuous ambient learning. Issue 1: the old
+    // firstSeenMs < AMBIENT_WARMUP_MS retag path has been deleted — that
+    // path re-captured any freq seen during warmup as ambient even if the
+    // probation table had correctly discarded it. Post-warmup we only
+    // auto-learn NEW confirmed taps that sit steady past AMBIENT_AUTOLEARN_MS.
     if (warmupComplete) {
         unsigned long now = millis();
         BandTracker* trackers[] = { &subGHzTracker, &band24Tracker };
@@ -1269,10 +1371,7 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
                     !tk.taps[i].isFsk &&
                     tk.taps[i].consecutiveHits >= TAP_CONFIRM_HITS &&
                     !isAmbientCadSource(tk.taps[i].frequency, tk.taps[i].sf)) {
-                    if (tk.taps[i].firstSeenMs < AMBIENT_WARMUP_MS) {
-                        recordAmbientTap(tk.taps[i].frequency, tk.taps[i].sf, true);
-                    }
-                    else if ((now - tk.taps[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
+                    if ((now - tk.taps[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
                         recordAmbientTap(tk.taps[i].frequency, tk.taps[i].sf, false);
                     }
                 }
@@ -1598,15 +1697,35 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                          && (ambientTapCount == 0);
         if (normalEnd || earlyExit) {
             warmupComplete = true;
-            // Single-grab mutex so the multi-line ambient-tap dump lands
-            // contiguously; other cores' output won't slice through it.
+
+            // Issue 1: graduate pending → ambient. Same logic as the LR1121
+            // path above — corroborated taps (FHSS/RID/GNSS-observed during
+            // warmup) are discarded rather than learned as infrastructure.
+            int graduated = 0;
+            int discarded = 0;
+            for (int i = 0; i < MAX_AMBIENT_TAPS; i++) {
+                if (!pendingAmbientTaps[i].active) continue;
+                if (pendingAmbientTaps[i].hasCorroboration) {
+                    discarded++;
+                } else {
+                    recordAmbientTap(pendingAmbientTaps[i].freqMHz,
+                                     pendingAmbientTaps[i].sf, false);
+                    graduated++;
+                }
+                pendingAmbientTaps[i].active = false;
+            }
+            pendingAmbientCount = 0;
+
             if (serialMutex &&
                 xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 if (earlyExit && !normalEnd) {
                     Serial.printf("[WARMUP] Early completion at %lus — clean environment. ",
                                   millis() / 1000);
                 }
-                Serial.printf("[WARMUP] Complete after %u cycles (%lus). %u ambient taps recorded:\n",
+                Serial.printf("[WARMUP] Complete. Graduated %d/%d pending taps as ambient "
+                              "(%d discarded — corroboration detected).\n",
+                              graduated, graduated + discarded, discarded);
+                Serial.printf("[WARMUP] After %u cycles (%lus). %u ambient taps active:\n",
                               warmupCycleCount, millis() / 1000, ambientTapCount);
                 for (uint8_t i = 0; i < ambientTapCount; i++) {
                     if (ambientTaps[i].active) {
@@ -1618,18 +1737,20 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                 xSemaphoreGive(serialMutex);
             }
         } else {
-            // Still in warmup — record ANY active LoRa tap as infrastructure.
-            // Threshold is 1 hit (not 2 or 3) because ambient sources are
-            // intermittent and may not accumulate consecutive hits in time.
+            // Issue 1: collect pending candidates — do NOT mark ambient yet.
             for (int i = 0; i < MAX_TAPS; i++) {
                 if (subGHzTracker.taps[i].active && !subGHzTracker.taps[i].isFsk) {
-                    recordAmbientTap(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf, true);
+                    addPendingAmbient(subGHzTracker.taps[i].frequency,
+                                      subGHzTracker.taps[i].sf);
                 }
             }
         }
     }
 
-    // Post-warmup continuous ambient learning (auto-learned, NOT warmup):
+    // Post-warmup continuous ambient learning. Issue 1: the
+    // firstSeenMs < AMBIENT_WARMUP_MS retag path deleted — it defeated
+    // the probation table by re-learning any freq seen during warmup even
+    // if the table correctly discarded it.
     if (warmupComplete) {
         unsigned long now = millis();
         for (int i = 0; i < MAX_TAPS; i++) {
@@ -1637,10 +1758,7 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                 !subGHzTracker.taps[i].isFsk &&
                 subGHzTracker.taps[i].consecutiveHits >= TAP_CONFIRM_HITS &&
                 !isAmbientCadSource(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf)) {
-                if (subGHzTracker.taps[i].firstSeenMs < AMBIENT_WARMUP_MS) {
-                    recordAmbientTap(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf, true);
-                }
-                else if ((now - subGHzTracker.taps[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
+                if ((now - subGHzTracker.taps[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
                     recordAmbientTap(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf, false);
                 }
             }

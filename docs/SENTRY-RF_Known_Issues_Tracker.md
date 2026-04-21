@@ -143,56 +143,82 @@ zero cycles at or above WARNING (score < 24).
 `detection_engine.cpp`, find the bypass path, add a `conf`-contribution
 gate that also requires `sustainedCycles >= N`.
 
-### [ ] Alert state ownership race (post-audit finding)
+### [~] Alert state ownership race — MITIGATED (Issue 8 pre-release fix)
 **Impact:** `displayTask` calls `alertAcknowledge()` and `alertToggleMute()`
 while `alertTask` mutates the same `_lastThreat` / `_isAcknowledged` /
-`_isMuted` globals. Worst case is a mute/ack taking an extra cycle to
-register. Not a field-safety failure.
-**Status:** Flagged in the April 21, 2026 pre-release audit (rev.md).
-Target **v2.1** — either add an `alertMutex` or migrate ack/mute signals
-through `detectionQueue` so they only execute in `alertTask`.
+`_isMuted` globals. Worst case was a mute/ack taking an extra cycle to
+register.
+**Mitigation:** Added `alertMutex` covering all three public entry points
+AND the alertTask queue drain. Deepened `detectionQueue` 10 → 32 slots.
+Changed producer sends from `xQueueSend(..., 0)` to `xQueueSend(..., 5ms)`
+with an `alertQueueDropInc()` counter that logs once per 10 s on non-zero
+drops. Source-single-writer refactor deferred to **v2.1** as a clean
+architecture move — current fix eliminates the torn-state risk.
+**Resolved for v2.0.0 tag (mitigated):** April 21, 2026.
+
+### [!] Warmup poisoning — OPEN, CRITICAL (fixed pre-tag in probation-table rewrite)
+**Impact (pre-fix):** A drone transmitting on any RF path during the
+20-50 s ambient-learning window was permanently tagged as infrastructure
+and remained invisible for the rest of the boot session.
+**Fix:** Issue 1 probation table. Taps observed during warmup enter a
+`pendingAmbient[]` holding area; at warmup completion only un-corroborated
+entries graduate to true ambient. Corroboration markers: FHSS diversity on
+a matching freq (marks that freq only), successful WiFi RID decode
+(blanket-marks all pending as drone-correlated), rising GNSS integrity
+threat (blanket-marks all pending). Also deleted the
+`firstSeenMs < AMBIENT_WARMUP_MS` retag path that was re-learning
+discarded taps after warmup ended. Boot summary: `[WARMUP] Complete.
+Graduated N/M pending taps as ambient (K discarded — corroboration
+detected).`
+**Resolved:** April 21, 2026 — v2.0.0 pre-release.
+
+### [!] NaN action-frame Remote ID decode — CLOSED (Issue 5, Option A)
+**Impact (pre-fix):** `findRemoteIdIE()` walked 0xD0 action frames as if
+they were beacon IE lists; NAN Service Discovery Frames carrying ASTM
+F3411 RID were not decoded.
+**Fix:** Added 24-byte MAC-header field to `CapturedFrame`, populated in
+the promiscuous ISR. Added `decodeNanActionRID()` which reconstructs the
+full 802.11 management frame and passes it to
+`odid_wifi_receive_message_pack_nan_action_frame()`. Dispatch by frame
+subtype: 0x80 → beacon IE walker, 0xD0 → NAN decoder. NAN decodes emit
+`[NAN-RID]` serial line; otherwise identical to beacon RID.
+**Resolved:** April 21, 2026 — v2.0.0 pre-release.
+
+### [~] 2.4 GHz OFDM plateau detector — MITIGATED (Issue 6)
+**Impact (pre-fix):** The WiFi-channel reject in `extractPeaks24()`
+dropped DJI OcuSync / Autel C2 flat-top OFDM signals that share WiFi
+channels. Those drones were invisible to the RF detection path on LR1121.
+**Mitigation:** Added `findLongestElevatedRun()` primitive that scans the
+full 100-bin 2.4 GHz sweep for contiguous elevated runs, independent of
+the peak-finder (bypasses `isWiFiChannel()`). Attached `bwWide` evidence
+to the best active sub-GHz candidate when a run of ≥ `OFDM_PLATEAU_MIN_BINS`
+persists for `OFDM_PLATEAU_PERSIST_CYCLES` sweeps. Same "confirmer, never
+seeds" policy as proto24/cad24.
+**Remaining limitation:** Still requires a correlated sub-GHz candidate
+to fire — a pure 2.4 GHz-only video emitter won't escalate on its own.
+Full standalone 2.4 GHz candidate tracking is v2.1+ work.
+**Mitigated:** April 21, 2026 — v2.0.0 pre-release.
 
 ---
 
 ## KNOWN LIMITATIONS (by design — not bugs)
 
-### Warmup poisoning window
-For the first ~20–50 s after boot, the ambient filter is building its
-baseline snapshot. A drone broadcasting *during* this window can be
-mistakenly tagged as ambient infrastructure and suppressed for the rest
-of the session. In operational use SENTRY-RF is deployed in an established
-position before power-on, so this is a low-probability corner case. A
-probation table that defers permanent ambient tagging until a frequency
-is seen consistently across multiple boots is on the **v2.1** roadmap.
+### GNSS alerts fire standalone; correlation still gates score boost
+Rising GNSS threat levels (jam / spoof / position-jump / C/N0 uniformity)
+emit a standalone DetectionEvent that sounds the buzzer directly (v2.0
+Issue 7 fix). The candidate engine's confirm-score GNSS contribution
+still requires a correlated RF candidate active within the last 30 s —
+this is deliberate, to prevent urban driving from boosting drone-score
+in the candidate engine. But jam/spoof DO alert on their own path via
+the new `DET_SOURCE_GNSS` queue events.
 
-### 2.4 GHz WiFi-channel rejection for OcuSync
-The wide-band classifier (Phase I) correctly counts adjacent elevated bins
-but the existing `narrowWidth > 6` filter in `extractPeaks()` rejects
-flat-top OFDM before classification. Flat-top 10 MHz OcuSync plateaus
-therefore don't reach the `bwWide` evidence slot. A separate wide-band
-detection pipeline that scans the full spectrum for contiguous elevated
-runs (independent of the peak finder) is on the **v2.1** roadmap. This
-was explicitly flagged in the Phase I commit and is not a regression.
-
-### GNSS anomalies require RF correlation to escalate
-A GNSS-only anomaly (e.g. driving under a bridge, multipath fade, single-
-sat dropout) does *not* escalate threat level on its own. The candidate
-engine only counts a GNSS anomaly as evidence when there was an RF-side
-ADVISORY crossing within the last 30 s. This is deliberate — it prevents
-urban driving from triggering spoofing alerts. Standalone GNSS alerts
-remain a separate product category, not a bug in this one.
-
-### NAN action-frame Remote ID not supported (beacon-only decode)
-ASTM F3411 allows Remote ID over 802.11 NAN (Neighbor Awareness
-Networking) action frames in addition to WiFi beacons. Our promiscuous
-capture does pass through 0xD0 action frames, but `findRemoteIdIE()`
-walks them as if they were beacons and will not correctly locate a NAN
-Service Discovery Frame's payload. In practice, all consumer drones in
-the FAA Remote ID compliance program broadcast on beacons; NAN-only
-emitters are rare. A proper NAN decoder using
-`odid_wifi_receive_message_pack_nan_action_frame()` requires preserving
-the full 802.11 management frame (our current capture drops the 24-byte
-MAC header), so it's a structural change planned for **v2.1**.
+### OFDM plateau detector is confirmer-only
+Issue 6 added a contiguous-elevated-bins scanner that bypasses the WiFi-
+channel reject so OcuSync / Autel C2 flat-top OFDM can contribute
+`bwWide` evidence. But it still only attaches to an already-existing
+sub-GHz candidate — a pure 2.4 GHz-only video emitter won't escalate
+unless the drone's sub-GHz control link has already been seen. Standalone
+2.4 GHz candidate tracking is v2.1+ work.
 
 ### SD card init on T3S3 hardware
 Known hardware issue — SD init fails on the specific T3S3 boards in the

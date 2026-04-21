@@ -274,6 +274,17 @@ static const unsigned long REMINDER_INTERVAL = 30000;  // 30 seconds
 // to ADVISORY+WARNING (40+) on fast-FHSS signals like ELRS 200Hz.
 #define FAST_SCORE_FHSS_CLUSTER     15
 
+// ── Issue 6: 2.4 GHz OFDM plateau detector ───────────────────────────
+// OcuSync / Autel C2 broadband video links emit flat-top OFDM across
+// ~10 MHz in the 2.4 GHz band, often sitting inside standard WiFi
+// channels where isWiFiChannel()'s peak-finder reject drops them. The
+// plateau detector scans for contiguous runs of elevated bins on the
+// 2.4 GHz sweep (100 bins × 1 MHz) and emits bwWide evidence when the
+// OFDM signature is seen persistently across multiple sweeps.
+#define OFDM_PLATEAU_THRESHOLD_DB      8.0f   // dB above adaptive noise floor
+#define OFDM_PLATEAU_MIN_BINS          10     // ≈10 MHz contiguous at 1 MHz step
+#define OFDM_PLATEAU_PERSIST_CYCLES    3      // sweeps in a row before firing
+
 // ── Phase I: Bandwidth discrimination (DJI OcuSync detection) ───────────────
 // Applied to the per-peak adjacent-bin count returned by
 // countElevatedAdjacentBins(). Bin spacing is 200 kHz on the sub-GHz sweep.

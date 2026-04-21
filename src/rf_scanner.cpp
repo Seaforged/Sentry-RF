@@ -62,6 +62,26 @@ int countElevatedAdjacentBins(const float* rssi, int numBins,
     return count;
 }
 
+// Issue 6: single-pass scan for the longest run of consecutive bins above
+// threshold. Used by the 2.4 GHz OFDM plateau detector which must find
+// flat-top broadcasts even when their peaks are dropped by the WiFi-channel
+// reject in extractPeaks24(). O(n), no allocation, no dependency on peak
+// detection.
+int findLongestElevatedRun(const float* rssi, int numBins, float threshold) {
+    if (numBins <= 0) return 0;
+    int longest = 0;
+    int current = 0;
+    for (int i = 0; i < numBins; i++) {
+        if (rssi[i] > threshold) {
+            current++;
+            if (current > longest) longest = current;
+        } else {
+            current = 0;
+        }
+    }
+    return longest;
+}
+
 // 10 test frequencies spread across 860-928 MHz for boot-time antenna check
 static const float ANTENNA_TEST_FREQS[] = {
     860.0f, 867.5f, 875.0f, 882.5f, 890.0f,
