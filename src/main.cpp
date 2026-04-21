@@ -16,6 +16,7 @@
 #include "cad_scanner.h"
 #include "data_logger.h"
 #include "wifi_scanner.h"
+#include "ble_scanner.h"
 #include "alert_handler.h"
 #include "error_messages.h"
 
@@ -826,6 +827,13 @@ void setup() {
     // WiFi radio dedicated to promiscuous scanning for drone Remote ID
     wifiScannerInit();
 
+    // Phase M: BLE scanner for ASTM F3411 BLE advertising (complements
+    // WiFi RID). Shares the 2.4 GHz radio with WiFi via ESP-IDF coexistence;
+    // 10% BLE duty cycle keeps WiFi largely undisturbed.
+#ifdef HAS_BLE_RID
+    bleScannerInit();
+#endif
+
     initCompassBus();
     if (!compassInit()) {
         Serial.println("[COMPASS] Not detected — continuing without compass");
@@ -843,6 +851,14 @@ void setup() {
                             PRIO_ALERT, &hAlertTask, CORE_GPS);
     xTaskCreatePinnedToCore(wifiScanTask, "WiFiScan", STACK_GPS_READ, nullptr,
                             PRIO_ALERT, &hWiFiTask, CORE_GPS);
+
+#ifdef HAS_BLE_RID
+    // Phase M: BLE RID scan task. Priority 1 (lowest of the tasks) because
+    // it's purely asynchronous and its latency targets (one advertisement
+    // per 500 ms) are orders of magnitude slacker than LoRa/GPS.
+    xTaskCreatePinnedToCore(bleScanTask, "BLEScan", 4096, nullptr,
+                            1, &hBLETask, CORE_GPS);
+#endif
 
     // Set initial WiFi mode
     systemState.wifiScannerActive = true;

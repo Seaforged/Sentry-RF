@@ -1,6 +1,8 @@
 #ifndef BOARD_CONFIG_H
 #define BOARD_CONFIG_H
 
+#include <stdint.h>
+
 // ============================================================
 // SENTRY-RF Board Pin Configuration
 // All hardware pin assignments live here — never hardcode pins
@@ -58,6 +60,12 @@ static const bool HAS_LR1121    = false;
 static const bool HAS_24GHZ     = false;
 static const bool WIFI_ENABLED  = true;
 
+// Phase M: BLE Remote ID scanning (ASTM F3411 BLE). All three boards are
+// ESP32-S3-based with BLE 5.0, so this is enabled on every target. The
+// BLE stack shares the 2.4 GHz radio with WiFi — the BLE scan task uses
+// a 10% duty cycle (50ms window / 500ms interval) to minimize WiFi impact.
+#define HAS_BLE_RID 1
+
 // Antenna boot self-test peak threshold — primary discriminator.
 // With antenna connected we expect ambient 915 MHz pickup above -95 dBm in
 // any populated area; bare SMA stubs top out around -105 to -110 dBm even
@@ -104,6 +112,9 @@ static const bool HAS_COMPASS   = false;
 static const bool HAS_LR1121    = false;
 static const bool HAS_24GHZ     = false;
 static const bool WIFI_ENABLED  = true;
+
+// Phase M: BLE Remote ID scanning — see comment in BOARD_T3S3 block.
+#define HAS_BLE_RID 1
 
 // Antenna boot self-test peak threshold — same SX1262 chipset as T3S3
 static const float ANTENNA_CHECK_THRESHOLD_DBM = -100.0f;
@@ -161,6 +172,9 @@ static const bool HAS_COMPASS   = true;
 static const bool HAS_LR1121    = true;
 static const bool HAS_24GHZ     = true;
 static const bool WIFI_ENABLED  = true;
+
+// Phase M: BLE Remote ID scanning — see comment in BOARD_T3S3 block.
+#define HAS_BLE_RID 1
 
 // Antenna boot self-test peak threshold — LR1121 has a quieter noise floor
 // (~-127 dBm) but ambient RF pickup in quiet environments only reaches
