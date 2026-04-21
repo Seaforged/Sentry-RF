@@ -110,9 +110,9 @@ void bleScannerInit() {
         bleQueue = xQueueCreate(BLE_QUEUE_DEPTH, sizeof(BleFrame));
     }
 
-    Serial.printf("[BLE] Scanner init — window=%ums interval=%ums (passive)\n",
-                  (unsigned)BLE_SCAN_WINDOW_MS,
-                  (unsigned)BLE_SCAN_INTERVAL_MS);
+    SERIAL_SAFE(Serial.printf("[BLE] Scanner init — window=%ums interval=%ums (passive)\n",
+                              (unsigned)BLE_SCAN_WINDOW_MS,
+                              (unsigned)BLE_SCAN_INTERVAL_MS));
 }
 
 void bleScannerStart() {
@@ -201,7 +201,7 @@ void bleScanTask(void* param) {
         if (mode == MODE_COVERT) {
             if (scanning) {
                 bleScannerStop();
-                Serial.println("[BLE] COVERT — scan stopped");
+                SERIAL_SAFE(Serial.println("[BLE] COVERT — scan stopped"));
                 scanning = false;
             }
             vTaskDelay(pdMS_TO_TICKS(500));
@@ -212,7 +212,7 @@ void bleScanTask(void* param) {
         // no-op a duplicate start so this is safe every iteration.
         if (!scanning) {
             bleScannerStart();
-            Serial.println("[BLE] Scan active (passive, 10% duty cycle)");
+            SERIAL_SAFE(Serial.println("[BLE] Scan active (passive, 10% duty cycle)"));
             scanning = true;
         }
 
@@ -239,12 +239,9 @@ void bleScanTask(void* param) {
             xSemaphoreGive(stateMutex);
         }
 
-        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            Serial.printf("[BLE-RID] UAS-ID: %s Drone: %.6f,%.6f RSSI:%ddBm\n",
-                          rid.uasID, rid.droneLat, rid.droneLon,
-                          (int)frame.rssi);
-            xSemaphoreGive(serialMutex);
-        }
+        SERIAL_SAFE(Serial.printf("[BLE-RID] UAS-ID: %s Drone: %.6f,%.6f RSSI:%ddBm\n",
+                                  rid.uasID, rid.droneLat, rid.droneLon,
+                                  (int)frame.rssi));
 
         // Queue a WARNING detection event. Reuses DET_SOURCE_WIFI so the
         // alert handler and downstream logging treat BLE-RID identically
