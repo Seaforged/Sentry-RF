@@ -1,6 +1,7 @@
 #include "cad_scanner.h"
 #include "rf_scanner.h"
 #include "board_config.h"
+#include "detection_types.h"   // SERIAL_SAFE macro for cross-core serial safety
 #include <Arduino.h>
 #include <string.h>
 
@@ -241,7 +242,8 @@ static void retagLiveTapsForNewAmbient(float freq, uint8_t sf) {
             if (tap.sf != sf) continue;                    // SF mismatch
             if (fabsf(tap.frequency - freq) > AMBIENT_FREQ_TOLERANCE) continue;
             tap.isAmbient = true;
-            Serial.printf("[WARMUP] progressive ambient tag: %.1fMHz\n", tap.frequency);
+            SERIAL_SAFE(Serial.printf("[WARMUP] progressive ambient tag: %.1fMHz\n",
+                                      tap.frequency));
         }
     }
 }
@@ -536,8 +538,8 @@ static uint8_t fhssFlushSpread() {
         fired++;
     }
     if (fired > 0) {
-        Serial.printf("[FHSS-SPREAD] %u unique (baseline=%u) -> diversity fired\n",
-                      uniqCount, baselineFhssUnique);
+        SERIAL_SAFE(Serial.printf("[FHSS-SPREAD] %u unique (baseline=%u) -> diversity fired\n",
+                                  uniqCount, baselineFhssUnique));
     }
     return fired;
 }
@@ -575,8 +577,8 @@ static uint8_t fhssFlushSpread24() {
         fired++;
     }
     if (fired > 0) {
-        Serial.printf("[FHSS-SPREAD-2G4] %u unique (baseline=%u) -> diversity fired\n",
-                      uniqCount, baselineFhssUnique);
+        SERIAL_SAFE(Serial.printf("[FHSS-SPREAD-2G4] %u unique (baseline=%u) -> diversity fired\n",
+                                  uniqCount, baselineFhssUnique));
     }
     return fired;
 }
@@ -1008,9 +1010,9 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
     bool pursuitMode = (countDiversity(subGHzTracker, DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
                        || (phase2aCadCount > 0);
     if (pursuitMode && !lastPursuitMode)
-        Serial.println("[PURSUIT] Activated");
+        SERIAL_SAFE(Serial.println("[PURSUIT] Activated"));
     else if (!pursuitMode && lastPursuitMode)
-        Serial.println("[PURSUIT] Deactivated");
+        SERIAL_SAFE(Serial.println("[PURSUIT] Deactivated"));
     lastPursuitMode = pursuitMode;
 
     auto sfHasActiveTapsSub = [](uint8_t sf) -> bool {
@@ -1224,18 +1226,25 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
                          && (ambientTapCount == 0);
         if (normalEnd || earlyExit) {
             warmupComplete = true;
-            if (earlyExit && !normalEnd) {
-                Serial.printf("[WARMUP] Early completion at %lus — clean environment. ",
-                              millis() / 1000);
-            }
-            Serial.printf("[WARMUP] Complete after %u cycles (%lus). %u ambient taps recorded:\n",
-                          warmupCycleCount, millis() / 1000, ambientTapCount);
-            for (uint8_t i = 0; i < ambientTapCount; i++) {
-                if (ambientTaps[i].active) {
-                    Serial.printf("  - %.1f MHz / SF%u (first seen cycle %u)\n",
-                                  ambientTaps[i].frequency, ambientTaps[i].sf,
-                                  ambientTaps[i].firstSeenCycle);
+            // Take serialMutex once around the whole block so the line
+            // listing N ambient taps prints contiguously without other
+            // cores' output interleaving in the middle.
+            if (serialMutex &&
+                xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                if (earlyExit && !normalEnd) {
+                    Serial.printf("[WARMUP] Early completion at %lus — clean environment. ",
+                                  millis() / 1000);
                 }
+                Serial.printf("[WARMUP] Complete after %u cycles (%lus). %u ambient taps recorded:\n",
+                              warmupCycleCount, millis() / 1000, ambientTapCount);
+                for (uint8_t i = 0; i < ambientTapCount; i++) {
+                    if (ambientTaps[i].active) {
+                        Serial.printf("  - %.1f MHz / SF%u (first seen cycle %u)\n",
+                                      ambientTaps[i].frequency, ambientTaps[i].sf,
+                                      ambientTaps[i].firstSeenCycle);
+                    }
+                }
+                xSemaphoreGive(serialMutex);
             }
         } else {
             for (int i = 0; i < MAX_TAPS; i++) {
@@ -1276,7 +1285,9 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
     // ambient frequency is learned, so this batch loop is redundant.
 
     if (cadErrorsThisCycle > 0) {
-        Serial.printf("[CAD] %u/%u probes returned errors (first=%d)\n", cadErrorsThisCycle, cadProbesThisCycle, cadFirstError);
+        SERIAL_SAFE(Serial.printf("[CAD] %u/%u probes returned errors (first=%d)\n",
+                                  cadErrorsThisCycle, cadProbesThisCycle,
+                                  cadFirstError));
     }
     {
         bool faultThisCycle = (cadProbesThisCycle > 0) && (cadErrorsThisCycle > cadProbesThisCycle / 2);
@@ -1425,9 +1436,9 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     bool pursuitMode = (countDiversity(subGHzTracker, DIVERSITY_WINDOW_MS) >= DIVERSITY_WARNING)
                        || (phase2CadCount > 0);
     if (pursuitMode && !lastPursuitMode)
-        Serial.println("[PURSUIT] Activated — focusing scan on active SFs");
+        SERIAL_SAFE(Serial.println("[PURSUIT] Activated — focusing scan on active SFs"));
     else if (!pursuitMode && lastPursuitMode)
-        Serial.println("[PURSUIT] Deactivated — normal scan");
+        SERIAL_SAFE(Serial.println("[PURSUIT] Deactivated — normal scan"));
     lastPursuitMode = pursuitMode;
 
     // Phase E: SFScan struct lives at file scope (promoted for potential
@@ -1479,9 +1490,9 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
 
 #ifdef DEBUG_CAD_PARAMS
         uint8_t idx = sc.sf - 6;
-        Serial.printf("[CAD-PARAMS] SF%u: sym=0x%02X peak=%u min=%u\n",
-                      sc.sf, cadParams[idx].symbolNum,
-                      cadParams[idx].detPeak, cadParams[idx].detMin);
+        SERIAL_SAFE(Serial.printf("[CAD-PARAMS] SF%u: sym=0x%02X peak=%u min=%u\n",
+                                  sc.sf, cadParams[idx].symbolNum,
+                                  cadParams[idx].detPeak, cadParams[idx].detMin));
 #endif
 
         // Sorted monotonic sweep: channels are scanned in ascending frequency
@@ -1587,18 +1598,24 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
                          && (ambientTapCount == 0);
         if (normalEnd || earlyExit) {
             warmupComplete = true;
-            if (earlyExit && !normalEnd) {
-                Serial.printf("[WARMUP] Early completion at %lus — clean environment. ",
-                              millis() / 1000);
-            }
-            Serial.printf("[WARMUP] Complete after %u cycles (%lus). %u ambient taps recorded:\n",
-                          warmupCycleCount, millis() / 1000, ambientTapCount);
-            for (uint8_t i = 0; i < ambientTapCount; i++) {
-                if (ambientTaps[i].active) {
-                    Serial.printf("  - %.1f MHz / SF%u (first seen cycle %u)\n",
-                                  ambientTaps[i].frequency, ambientTaps[i].sf,
-                                  ambientTaps[i].firstSeenCycle);
+            // Single-grab mutex so the multi-line ambient-tap dump lands
+            // contiguously; other cores' output won't slice through it.
+            if (serialMutex &&
+                xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                if (earlyExit && !normalEnd) {
+                    Serial.printf("[WARMUP] Early completion at %lus — clean environment. ",
+                                  millis() / 1000);
                 }
+                Serial.printf("[WARMUP] Complete after %u cycles (%lus). %u ambient taps recorded:\n",
+                              warmupCycleCount, millis() / 1000, ambientTapCount);
+                for (uint8_t i = 0; i < ambientTapCount; i++) {
+                    if (ambientTaps[i].active) {
+                        Serial.printf("  - %.1f MHz / SF%u (first seen cycle %u)\n",
+                                      ambientTaps[i].frequency, ambientTaps[i].sf,
+                                      ambientTaps[i].firstSeenCycle);
+                    }
+                }
+                xSemaphoreGive(serialMutex);
             }
         } else {
             // Still in warmup — record ANY active LoRa tap as infrastructure.
@@ -1635,7 +1652,9 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     // ambient frequency is learned, so this batch loop is redundant.
 
     if (cadErrorsThisCycle > 0) {
-        Serial.printf("[CAD] %u/%u probes returned errors (first=%d)\n", cadErrorsThisCycle, cadProbesThisCycle, cadFirstError);
+        SERIAL_SAFE(Serial.printf("[CAD] %u/%u probes returned errors (first=%d)\n",
+                                  cadErrorsThisCycle, cadProbesThisCycle,
+                                  cadFirstError));
     }
     {
         bool faultThisCycle = (cadProbesThisCycle > 0) && (cadErrorsThisCycle > cadProbesThisCycle / 2);

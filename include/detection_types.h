@@ -119,4 +119,29 @@ extern SemaphoreHandle_t stateMutex;
 extern SemaphoreHandle_t serialMutex;
 extern QueueHandle_t     detectionQueue;
 
+// Phase K/rev F1: thread-safe serial-print wrapper. The two ESP32 cores can
+// both emit serial traffic; without this, concurrent Serial.printf calls
+// from Core 0 (alertTask, gpsReadTask, etc.) and Core 1 (loRaScanTask and
+// everything it calls — detection_engine, cad_scanner, rf_scanner) can
+// interleave mid-line. Critically, that corrupts the Phase L [ZMQ] JSON
+// frame format that the host-side bridge (tools/zmq_bridge.py) expects.
+//
+// Usage:
+//   SERIAL_SAFE(Serial.printf("[CAND] raw=%s ...", threatName(...)));
+//
+// The macro arg is a statement; commas inside the printf's own argument
+// list are protected by the inner parens, so macro-argument splitting is
+// not a problem. Safe to use before serialMutex is created (pre-task
+// setup code) — falls through to an unprotected call.
+#define SERIAL_SAFE(body)                                                    \
+    do {                                                                     \
+        if (serialMutex &&                                                   \
+            xSemaphoreTake(serialMutex, pdMS_TO_TICKS(20)) == pdTRUE) {      \
+            body;                                                            \
+            xSemaphoreGive(serialMutex);                                     \
+        } else {                                                             \
+            body;                                                            \
+        }                                                                    \
+    } while (0)
+
 #endif // DETECTION_TYPES_H

@@ -863,8 +863,9 @@ static const char* threatName(ThreatLevel t) {
 // reassessment cycles.
 static void emitThreatTransition(ThreatLevel prev, ThreatLevel next, uint32_t nowMs) {
     if (prev == next) return;
-    Serial.printf("[FSM] %s -> %s at %lums\n",
-                  threatName(prev), threatName(next), (unsigned long)nowMs);
+    SERIAL_SAFE(Serial.printf("[FSM] %s -> %s at %lums\n",
+                              threatName(prev), threatName(next),
+                              (unsigned long)nowMs));
 }
 
 // Phase D Stabilization: emit a DetectionEvent into the alert pipeline on
@@ -993,8 +994,9 @@ void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan
         for (int p = 0; p < peakCount; p++) {
             if (peaks[p].bwClass != BW_WIDE) continue;
             float approxMHz = peaks[p].adjacentBinCount * SCAN_FREQ_STEP;
-            Serial.printf("[BW] Wide-band signal detected: %.1f MHz, %d bins elevated (~%.1f MHz)\n",
-                          peaks[p].frequency, peaks[p].adjacentBinCount, approxMHz);
+            SERIAL_SAFE(Serial.printf("[BW] Wide-band signal detected: %.1f MHz, %d bins elevated (~%.1f MHz)\n",
+                                      peaks[p].frequency,
+                                      peaks[p].adjacentBinCount, approxMHz));
             // Attach to any active sub-GHz candidate whose anchor overlaps
             // the peak's center frequency (±CAND_ASSOC_SUB_MHZ). Same
             // association window as the sweep/proto confirmers.
@@ -1145,8 +1147,8 @@ void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan
                                 (uint8_t)WEIGHT_CONFIRM_PROTO,
                                 TTL_PROTO24_MS, nowMs, /*ready=*/true);
                 bestSubGHz->bandMask |= 0x02;
-                Serial.printf("[CAND] 2.4GHz proto confirmed — attached to anchor=%.1fMHz\n",
-                              bestSubGHz->anchorFreq);
+                SERIAL_SAFE(Serial.printf("[CAND] 2.4GHz proto confirmed — attached to anchor=%.1fMHz\n",
+                                          bestSubGHz->anchorFreq));
             }
         }
     }
@@ -1320,8 +1322,8 @@ static ThreatDecision evaluateCandidateEngine(const GpsData& gps,
                 refreshEvidence(bestSubGHz->cad24, 10, TTL_CAD24_MS, nowMs,
                                 /*ready=*/true);
                 bestSubGHz->bandMask |= 0x02;
-                Serial.printf("[CAND] 2.4GHz confirmed — attached to anchor=%.1fMHz\n",
-                              bestSubGHz->anchorFreq);
+                SERIAL_SAFE(Serial.printf("[CAND] 2.4GHz confirmed — attached to anchor=%.1fMHz\n",
+                                          bestSubGHz->anchorFreq));
             }
         }
     }
@@ -1381,10 +1383,12 @@ static ThreatDecision evaluateCandidateEngine(const GpsData& gps,
         }
     } else {
         if (ridFresh) {
-            Serial.printf("[CAND] RID skipped — %d active candidates\n", activeCount);
+            SERIAL_SAFE(Serial.printf("[CAND] RID skipped — %d active candidates\n",
+                                      activeCount));
         }
         if (gnssAnomaly) {
-            Serial.printf("[CAND] GNSS skipped — %d active candidates\n", activeCount);
+            SERIAL_SAFE(Serial.printf("[CAND] GNSS skipped — %d active candidates\n",
+                                      activeCount));
         }
     }
 
@@ -1443,8 +1447,8 @@ ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& int
     if (desired == THREAT_CLEAR && currentThreat > THREAT_CLEAR) {
         if (rapidClearSinceMs == 0) rapidClearSinceMs = nowMs;
         if ((nowMs - rapidClearSinceMs) >= RAPID_CLEAR_CLEAN_MS) {
-            Serial.printf("[RAPID-CLEAR] %lums clean — forcing CLEAR\n",
-                          (unsigned long)(nowMs - rapidClearSinceMs));
+            SERIAL_SAFE(Serial.printf("[RAPID-CLEAR] %lums clean — forcing CLEAR\n",
+                                      (unsigned long)(nowMs - rapidClearSinceMs)));
             currentThreat = THREAT_CLEAR;
             rapidClearSinceMs = 0;
             candidateThreatEventMs = nowMs;
@@ -1472,12 +1476,12 @@ ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& int
 
     // Phase E: [CAND] log line — prints raw decision AND committed (post-
     // hysteresis) levels so [CAND] level matches what the FSM actually drives.
-    Serial.printf("[CAND] raw=%s committed=%s fast=%u conf=%u anchor=%.1fMHz band=0x%02X has=%d\n",
-                  threatName(decision.level),
-                  threatName(decision.committedLevel),
-                  decision.fastScore, decision.confirmScore,
-                  decision.anchorFreq, decision.bandMask,
-                  decision.hasCandidate ? 1 : 0);
+    SERIAL_SAFE(Serial.printf("[CAND] raw=%s committed=%s fast=%u conf=%u anchor=%.1fMHz band=0x%02X has=%d\n",
+                              threatName(decision.level),
+                              threatName(decision.committedLevel),
+                              decision.fastScore, decision.confirmScore,
+                              decision.anchorFreq, decision.bandMask,
+                              decision.hasCandidate ? 1 : 0));
 
     // Fire transition emitter — drives buzzer / LED / OLED / [FSM] log
     emitThreatTransition(prevThreat, currentThreat, nowMs);

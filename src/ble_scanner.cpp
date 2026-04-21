@@ -33,11 +33,11 @@ static const uint16_t BLE_ASTM_UUID = 0xFFFA;
 struct BleFrame {
     int8_t   rssi;
     uint16_t payloadLen;
-    uint8_t  payload[64];   // ODID pack can reach ~230B on BLE 5 extended;
-                            // legacy (BLE 4) fits in 26B. 64B covers legacy
-                            // comfortably; pack-mode data beyond this length
-                            // is silently dropped — acceptable given duty
-                            // cycle (next broadcast window is 500ms away).
+    uint8_t  payload[256];  // Sized for BLE 5 extended advertising: a full
+                            // ODID MessagePack is up to ~230B (9 messages
+                            // × 25B + header + counter). 256 covers the
+                            // standard ceiling with slack for variant
+                            // implementations. Queue cost: 4 × 256 = 1 KB.
 };
 
 static const UBaseType_t BLE_QUEUE_DEPTH = 4;
@@ -152,6 +152,11 @@ static bool decodeBleRID(const BleFrame& f, DecodedRID& out) {
 
     const uint8_t* pack = f.payload + 1;  // skip 1-byte message counter
     uint16_t       packLen = f.payloadLen - 1;
+
+    // OOB guard (same as wifi_scanner.cpp path): ODID_MessagePack_encoded
+    // header is 3 bytes and the library reads them unconditionally before
+    // its own buflen check. Refuse anything smaller.
+    if (packLen < 3) return false;
 
     ODID_UAS_Data uas;
     odid_initUasData(&uas);

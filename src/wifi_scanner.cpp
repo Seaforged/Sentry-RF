@@ -17,7 +17,10 @@ extern "C" {
 
 // ── Packet capture queue ────────────────────────────────────────────────────
 
-static const int MAX_PAYLOAD = 256;
+// Beacon body ceiling: fixed fields (12B) + max SSID IE (34B) + rates IE
+// (3B) + vendor IE with full RID pack (~187B) + headroom for country/power
+// constraint IEs ~= 300B on worst case. 320B gives ~20B margin above that.
+static const int MAX_PAYLOAD = 320;
 
 struct CapturedFrame {
     uint8_t  srcMAC[6];
@@ -226,6 +229,13 @@ static bool decodeBeaconRID(const CapturedFrame& frame,
 
     const uint8_t* pack = frame.payload + ieDataOffset + 5;
     uint16_t       packLen = ieDataLen - 5;
+
+    // Guard against OOB read: odid_message_process_pack() dereferences the
+    // 3-byte ODID_MessagePack_encoded header (ProtoVersion/MessageType byte,
+    // SingleMessageSize, MsgPackSize) BEFORE its own buflen sanity check.
+    // A truncated or malformed beacon IE with fewer than 3 pack bytes would
+    // read past the end of our captured frame buffer.
+    if (packLen < 3) return false;
 
     ODID_UAS_Data uas;
     odid_initUasData(&uas);

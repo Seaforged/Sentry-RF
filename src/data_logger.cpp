@@ -4,9 +4,37 @@
 #include "version.h"
 #include <Arduino.h>
 #include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 static uint32_t writeCount = 0;
 static const uint32_t FLUSH_INTERVAL = 10;
+
+// Phase K/rev F7: loggerWrite() runs in loRaScanTask (Core 1);
+// loggerLogModeChange() runs in displayTask (Core 0); loggerLogSelfTest()
+// runs in setup() (pre-task, single-threaded). All three touch the same
+// File objects (logFile, jsonlFile). SD driver writes are NOT thread-safe —
+// concurrent writes from two cores can interleave bytes across JSONL rows
+// or corrupt internal buffer pointers. This mutex serializes every entry
+// point so a single row always lands contiguously.
+static SemaphoreHandle_t loggerMutex = nullptr;
+
+static void loggerMutexInit() {
+    if (loggerMutex == nullptr) {
+        loggerMutex = xSemaphoreCreateMutex();
+    }
+}
+
+// Try to acquire the logger mutex. Returns true if acquired OR if the
+// mutex doesn't yet exist (pre-init single-threaded caller is safe).
+static bool loggerLock() {
+    if (loggerMutex == nullptr) return true;
+    return xSemaphoreTake(loggerMutex, pdMS_TO_TICKS(50)) == pdTRUE;
+}
+
+static void loggerUnlock() {
+    if (loggerMutex != nullptr) xSemaphoreGive(loggerMutex);
+}
 
 // Phase L: ZMQ emit debouncers — enforce ≤ 1 Hz per event type so a tight
 // transition flap or a busy RID beacon can't flood the serial link. Kept
@@ -107,8 +135,9 @@ static int findNextIndex() {
 }
 
 bool loggerInit() {
-    Serial.printf("[LOG] SD pins: CS=%d SCK=%d MISO=%d MOSI=%d\n",
-                  PIN_SD_CS, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI);
+    // Create the cross-task serialization mutex before any logger entry
+    // point could be racing. Idempotent.
+    loggerMutexInit();
 
     Serial.printf("[LOG] SD pins: CS=%d SCK=%d MISO=%d MOSI=%d\n",
                   PIN_SD_CS, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI);
@@ -167,6 +196,7 @@ bool loggerInit() {
 }
 
 void loggerWrite(const SystemState& state, uint32_t sweepNum) {
+    if (!loggerLock()) return;   // contention > 50 ms — drop this row
     unsigned long ts = millis();
 
     // Legacy CSV
@@ -217,23 +247,29 @@ void loggerWrite(const SystemState& state, uint32_t sweepNum) {
         if (logFile) logFile.flush();
         if (jsonlFile) jsonlFile.flush();
     }
+    loggerUnlock();
 }
 
 void loggerFlush() {
+    if (!loggerLock()) return;
     if (logFile) logFile.flush();
     if (jsonlFile) jsonlFile.flush();
+    loggerUnlock();
 }
 
 void loggerLogModeChange(const char* modeLabel, const char* uptimeHMS) {
+    if (!loggerLock()) return;
     if (jsonlFile) {
         jsonlFile.printf("{\"t\":%lu,\"event\":\"mode_change\","
                          "\"mode\":\"%s\",\"uptime\":\"%s\"}\n",
                          millis(), modeLabel, uptimeHMS);
         jsonlFile.flush();
     }
+    loggerUnlock();
 }
 
 void loggerLogSelfTest(bool radioOK, bool antennaOK, uint32_t bootCount) {
+    if (!loggerLock()) return;
     if (jsonlFile) {
         jsonlFile.printf("{\"event\":\"selftest\","
                          "\"radio\":\"%s\",\"antenna\":\"%s\","
@@ -243,6 +279,7 @@ void loggerLogSelfTest(bool radioOK, bool antennaOK, uint32_t bootCount) {
                          FW_VERSION, (unsigned)bootCount);
         jsonlFile.flush();
     }
+    loggerUnlock();
 }
 
 #endif // BOARD_T3S3
@@ -256,6 +293,8 @@ static File logFile;
 static const size_t MAX_LOG_SIZE = 100 * 1024;  // 100 KB rotation
 
 bool loggerInit() {
+    loggerMutexInit();
+
     if (!SPIFFS.begin(true)) {
         Serial.println("[LOG] SPIFFS init failed");
         return false;
@@ -291,7 +330,8 @@ bool loggerInit() {
 }
 
 void loggerWrite(const SystemState& state, uint32_t sweepNum) {
-    if (!logFile) return;
+    if (!loggerLock()) return;
+    if (!logFile) { loggerUnlock(); return; }
 
     logFile.printf("%lu,%u,%d,%.1f,%.1f,%.6f,%.6f,%d,%d,%d,%d,%.1f\n",
                    millis(), sweepNum, state.threatLevel,
@@ -303,24 +343,30 @@ void loggerWrite(const SystemState& state, uint32_t sweepNum) {
 
     writeCount++;
     if (writeCount % FLUSH_INTERVAL == 0) logFile.flush();
+    loggerUnlock();
 }
 
 void loggerFlush() {
+    if (!loggerLock()) return;
     if (logFile) logFile.flush();
+    loggerUnlock();
 }
 
 void loggerLogModeChange(const char* modeLabel, const char* uptimeHMS) {
     // Heltec V3 uses SPIFFS CSV only (no JSONL sibling), so we inline
     // the mode change as a CSV comment line. Humans skim the log; the
     // "# mode_change," prefix makes it grep-friendly.
+    if (!loggerLock()) return;
     if (logFile) {
         logFile.printf("# mode_change,%lu,%s,%s\n",
                        millis(), modeLabel, uptimeHMS);
         logFile.flush();
     }
+    loggerUnlock();
 }
 
 void loggerLogSelfTest(bool radioOK, bool antennaOK, uint32_t bootCount) {
+    if (!loggerLock()) return;
     if (logFile) {
         logFile.printf("# selftest,%s,%s,%s,%u\n",
                        radioOK   ? "OK" : "FAIL",
@@ -328,6 +374,7 @@ void loggerLogSelfTest(bool radioOK, bool antennaOK, uint32_t bootCount) {
                        FW_VERSION, (unsigned)bootCount);
         logFile.flush();
     }
+    loggerUnlock();
 }
 
 #endif // BOARD_HELTEC_V3

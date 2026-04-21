@@ -1,6 +1,7 @@
 #include "rf_scanner.h"
 #include "board_config.h"
 #include "sentry_config.h"
+#include "detection_types.h"   // SERIAL_SAFE macro + serialMutex extern
 #include <Arduino.h>
 #include <algorithm>
 #include <cmath>
@@ -35,7 +36,8 @@ void computeAdaptiveNoiseFloor(const ScanResult& result) {
         adaptiveNoiseFloor = NF_ALPHA_SLOW * median + (1.0f - NF_ALPHA_SLOW) * adaptiveNoiseFloor;
     }
 
-    Serial.printf("[NF] adaptive=%.1f dBm (median=%.1f)\n", adaptiveNoiseFloor, median);
+    SERIAL_SAFE(Serial.printf("[NF] adaptive=%.1f dBm (median=%.1f)\n",
+                              adaptiveNoiseFloor, median));
 }
 
 float getAdaptiveNoiseFloor() {
@@ -271,8 +273,9 @@ void scannerSweep(SX1262& radio, ScanResult& result) {
     computeAdaptiveNoiseFloor(result);
 
     // Debug: check RSSI at key frequencies across the band
-    Serial.printf("[SCAN-DBG] 860:%.0f 880:%.0f 900:%.0f 920:%.0f\n",
-                  result.rssi[0], result.rssi[100], result.rssi[200], result.rssi[300]);
+    SERIAL_SAFE(Serial.printf("[SCAN-DBG] 860:%.0f 880:%.0f 900:%.0f 920:%.0f\n",
+                              result.rssi[0], result.rssi[100],
+                              result.rssi[200], result.rssi[300]));
 }
 
 bool scannerAntennaCheck(SX1262& radio) {
