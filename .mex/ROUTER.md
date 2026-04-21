@@ -25,7 +25,7 @@ Then read this file fully before doing anything else in this session.
 
 ## Current Project State
 
-**Version:** v1.5.3 — AAD persistence gate at 5 cycles, dual-band CAD on LR1121, consecutiveHits ≥ 2 diversity gate.
+**Version:** v1.9.0 — Phase H shipped: operational modes (STANDARD/COVERT/HIGH_ALERT) verified on LR1121 hardware 2026-04-21.
 
 **Working:**
 - Sub-GHz CAD detection on all three boards (t3s3, heltec_v3, t3s3_lr1121) with SF6-SF12 sweep across 860-930 MHz
@@ -37,13 +37,13 @@ Then read this file fully before doing anything else in this session.
 - WiFi Remote ID scanner (ASTM F3411), GNSS integrity (u-blox M10 UBX), LED + buzzer alerts
 - 6-screen OLED UI (7 on LR1121 with 2.4 GHz spectrum), rotated by BOOT button
 - GPS serial output rate-limited to 5s to prevent serial buffer overflow
+- Operational modes (STANDARD / COVERT / HIGH_ALERT) — double-tap BOOT toggles HIGH_ALERT, triple-tap toggles COVERT. COVERT fully deinits WiFi (esp_wifi_stop→deinit), blanks OLED, suppresses buzzer+LED. HIGH_ALERT extends RSSI sweep gate from 8s to 10s so CAD gets scan budget. Multi-press FSM in displayTask with 800ms quiet-window disambiguation.
 
 **Not yet built:**
 - BLE Remote ID scanning (ESP32-S3 BLE advertising channel sweep)
 - 2.4 GHz protocol classification (ELRS_2G4 vs GHOST_2G4 vs TRACER_2G4)
 - Per-band diversity tracking (currently pooled across sub-GHz + 2.4 GHz)
 - Dual-band correlation engine (paired signal detection from D-TECT-R research)
-- Operational modes (STANDARD / COVERT / HIGH_ALERT)
 - Boot self-test with antenna quality check
 
 **Known issues:**
