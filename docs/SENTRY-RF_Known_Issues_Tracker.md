@@ -108,9 +108,9 @@ gracefully. Requirements pinned in `tools/requirements_analysis.txt`.
 
 ### [ ] FSK_DETECT_THRESHOLD_DBM bench vs field split
 **Impact:** -50 dBm is bench-safe but conservative for field. -70 dBm is
-field-appropriate but trips immediate CRITICAL on bench from ambient ISM
+field-appropriate but can trip earlier on a noisy bench from ambient ISM
 energy.
-**Current value:** -50 dBm (bench-safe).
+**Current value:** -70 dBm (field-oriented).
 **Plan:** Change to -70 dBm before field deployment, or add runtime
 BENCH/FIELD mode switch. **Target:** v2.1.
 

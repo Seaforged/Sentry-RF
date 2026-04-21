@@ -37,6 +37,8 @@ static const char* threatStr(ThreatLevel t) {
 // ── State ───────────────────────────────────────────────────
 
 static ThreatLevel   _lastThreat       = THREAT_CLEAR;
+static ThreatLevel   _eventThreat      = THREAT_CLEAR;  // RF/WiFi event-driven state
+static ThreatLevel   _gnssThreat       = THREAT_CLEAR;  // standalone GNSS state
 static ThreatLevel   _acknowledgedAt   = THREAT_CLEAR;
 static bool          _isAcknowledged   = false;
 static bool          _isMuted          = false;
@@ -222,7 +224,7 @@ void alertTask(void* param) {
         // bursty producers (RF/WiFi/BLE/GNSS/candidate engine/mode) on
         // the deepened 32-slot queue without starving.
         while (xQueueReceive(detectionQueue, &event, pdMS_TO_TICKS(10)) == pdTRUE) {
-            ThreatLevel newLevel = (ThreatLevel)event.severity;
+            ThreatLevel eventLevel = (ThreatLevel)event.severity;
 
             // Serial log — suppress (freq, rssi) suffix when fields are
             // not populated. CAD/FSK/FHSS events often have freq=0 (multi-
@@ -252,50 +254,50 @@ void alertTask(void* param) {
             // displayTask button-driven writes don't tear state.
             xSemaphoreTake(alertMutex, portMAX_DELAY);
             ThreatLevel prevThreat = _lastThreat;
-            ThreatLevel newLevelLocal = (ThreatLevel)event.severity;
-            bool escalated = false;
-            bool deescalatedToClear = false;
+            ThreatLevel newLevelLocal = eventLevel;
+            if (event.source == DET_SOURCE_GNSS) {
+                _gnssThreat = newLevelLocal;
+            } else {
+                _eventThreat = newLevelLocal;
+            }
 
-            if (newLevelLocal > prevThreat) {
+            ThreatLevel effectiveThreat =
+                (_eventThreat > _gnssThreat) ? _eventThreat : _gnssThreat;
+            bool escalated = (effectiveThreat > prevThreat);
+            bool deescalatedToClear =
+                (effectiveThreat == THREAT_CLEAR && prevThreat > THREAT_CLEAR);
+
+            if (escalated) {
                 _isAcknowledged = false;
                 _lastEscalationMs = millis();
-                _lastThreat = newLevelLocal;
-                escalated = true;
-            } else if (newLevelLocal == prevThreat && !_isAcknowledged) {
-                // same-level-not-ack'd — escalation timestamp updated by
-                // the actual buzzer branches below under alertMutex
-            } else if (newLevelLocal < prevThreat) {
-                if (newLevelLocal == THREAT_CLEAR) {
-                    _isAcknowledged = false;
-                    _lastThreat = newLevelLocal;
-                    deescalatedToClear = true;
-                } else {
-                    _lastThreat = newLevelLocal;
-                }
+            } else if (deescalatedToClear) {
+                _isAcknowledged = false;
             }
+            _lastThreat = effectiveThreat;
+            bool ackedNow = _isAcknowledged;
             xSemaphoreGive(alertMutex);
 
             // Side effects (buzzer, serial) run outside the alertMutex so
             // they don't block other state writers. Buzzer patterns are
             // non-blocking; SERIAL_SAFE uses its own mutex.
             if (escalated) {
-                if (!covert && newLevelLocal >= THREAT_WARNING) {
-                    TonePatternType pat = selectPattern(event.source, newLevelLocal);
+                if (!covert && _lastThreat >= THREAT_WARNING) {
+                    TonePatternType pat = selectPattern(event.source, _lastThreat);
                     buzzerPlayPattern(pat);
                 }
                 SERIAL_SAFE(Serial.printf("[ALERT] ESCALATION: %s -> %s — buzzer: %s\n",
                                           threatStr(prevThreat),
-                                          threatStr(newLevelLocal),
-                                          (newLevelLocal >= THREAT_WARNING) ? "ON" : "silent"));
-            } else if (newLevelLocal == prevThreat && !snapAck) {
+                                          threatStr(_lastThreat),
+                                          (_lastThreat >= THREAT_WARNING) ? "ON" : "silent"));
+            } else if (_lastThreat == prevThreat && !ackedNow) {
                 // SAME LEVEL, NOT ACK'd — COVERT suppresses all output
                 // ; HIGH_ALERT fires immediately (no debounce); otherwise
                 // wait for REMINDER_INTERVAL before a soft reminder.
                 if (covert) {
                     // no-op
-                } else if (highAlert && newLevelLocal >= THREAT_WARNING &&
+                } else if (highAlert && _lastThreat >= THREAT_WARNING &&
                            !buzzerIsPlaying()) {
-                    TonePatternType pat = selectPattern(event.source, newLevelLocal);
+                    TonePatternType pat = selectPattern(event.source, _lastThreat);
                     buzzerPlayPattern(pat);
                     xSemaphoreTake(alertMutex, portMAX_DELAY);
                     _lastEscalationMs = millis();
@@ -307,7 +309,7 @@ void alertTask(void* param) {
                     if (timeToRemind) _lastEscalationMs = millis();
                     xSemaphoreGive(alertMutex);
                     if (timeToRemind && !buzzerIsPlaying() &&
-                        newLevelLocal >= THREAT_WARNING) {
+                        _lastThreat >= THREAT_WARNING) {
                         buzzerPlayPattern(TONE_RF_ADVISORY);
                     }
                 }

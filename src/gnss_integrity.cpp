@@ -36,7 +36,7 @@ static float computeCnoMean(const float* cno, int count) {
     return sum / count;
 }
 
-// Standard deviation — measures signal uniformity across constellation
+// Standard deviation - measures signal uniformity across constellation
 static float computeCnoStdDev(const float* cno, int count, float mean) {
     if (count < 2) return 99.0;
     float sumSq = 0.0;
@@ -54,7 +54,7 @@ static void evaluateJamming(const GpsData& gps, IntegrityStatus& status) {
 // Position jump: sudden >100 m teleport with a tight hAcc is a strong spoofing
 // indicator. Real drift stays small; a spoofer flipping its simulated position
 // produces a hard step while the receiver still reports high confidence.
-// Static locals persist the previous valid fix across calls — no struct field
+// Static locals persist the previous valid fix across calls - no struct field
 // needed since state only matters inside this module.
 static void evaluatePositionJump(const GpsData& gps, IntegrityStatus& status) {
     if (gps.fixType < 3) return;
@@ -76,8 +76,8 @@ static void evaluatePositionJump(const GpsData& gps, IntegrityStatus& status) {
         float distM = sqrtf(dLat * dLat + dLon * dLon);
         if (distM > GNSS_POSITION_JUMP_THRESHOLD_M) {
             status.positionJumpDetected = true;
-            Serial.printf("[GNSS] position jump %.0fm (hAcc=%.1fm) — SPOOFING INDICATOR\n",
-                          distM, hAccM);
+            SERIAL_SAFE(Serial.printf("[GNSS] position jump %.0fm (hAcc=%.1fm) - SPOOFING INDICATOR\n",
+                                      distM, hAccM));
         }
     }
 
@@ -92,9 +92,9 @@ static void evaluateSpoofing(const GpsData& gps, IntegrityStatus& status) {
 
     // C/N0 uniformity check: real satellites at different ranges/elevations have
     // varied signal strength. A spoofer broadcasts from one point so all signals
-    // arrive at similar power — stdDev collapses below ~2 dB-Hz.
+    // arrive at similar power - stdDev collapses below ~2 dB-Hz.
     //
-    // Uniformity check suppressed when GPS_MIN_CNO < 15 — indoor attenuated
+    // Uniformity check suppressed when GPS_MIN_CNO < 15 - indoor attenuated
     // signals cluster naturally and produce false positives.
     if (GPS_MIN_CNO < 15) {
         status.cnoAnomalyDetected = false;
@@ -124,10 +124,10 @@ static void evaluateThreatLevel(IntegrityStatus& status) {
     }
 }
 
-// Issue 7: track the last emitted threat level so we only publish an
-// event on rising transitions (CLEAR→ADVISORY, ADVISORY→WARNING,
-// WARNING→CRITICAL). Decays and steady-state updates don't flood the
-// alert queue. File-static because integrityUpdate is the single writer.
+// Track the last emitted GNSS threat so we publish on transitions, not every
+// sample. Rising transitions drive new alerts; falling transitions and clear
+// events let alertTask retire standalone GNSS state instead of leaving it
+// stuck until some unrelated RF event arrives.
 static uint8_t lastEmittedThreatLevel = 0;
 
 static void emitGnssDetectionEvent(uint8_t level, const IntegrityStatus& status) {
@@ -139,9 +139,11 @@ static void emitGnssDetectionEvent(uint8_t level, const IntegrityStatus& status)
     event.rssi      = (float)status.cnoStdDev;
     event.timestamp = millis();
     // Description lists the specific indicator(s) that fired. Multiple
-    // indicators can coexist (e.g. jam + spoof).
+    // indicators can coexist (e.g. jam + spoof). CLEAR uses an explicit tag
+    // so the alert task can log and retire GNSS-only state coherently.
     const char* tag =
-        status.jammingDetected    ? "jam"
+        (level == THREAT_CLEAR)   ? "clear"
+      : status.jammingDetected    ? "jam"
       : status.positionJumpDetected ? "position-jump"
       : status.cnoAnomalyDetected ? "C/N0 uniformity"
       : status.spoofingDetected   ? "spoof"
@@ -154,7 +156,7 @@ static void emitGnssDetectionEvent(uint8_t level, const IntegrityStatus& status)
 }
 
 void integrityUpdate(const GpsData& gps, IntegrityStatus& status) {
-    // Reset output fields — prevents stale true values carrying across cycles
+    // Reset output fields - prevents stale true values carrying across cycles
     status.jammingDetected    = false;
     status.spoofingDetected   = false;
     status.cnoAnomalyDetected = false;
@@ -162,7 +164,7 @@ void integrityUpdate(const GpsData& gps, IntegrityStatus& status) {
     status.threatLevel        = 0;
     status.cnoStdDev          = 99.0;
 
-    // Don't run detection on uninitialized sensor data — MON-HW and NAV-SAT
+    // Don't run detection on uninitialized sensor data - MON-HW and NAV-SAT
     // auto packets haven't arrived yet if all values are still zero
     if (gps.jammingState == 0 && gps.jamInd == 0 && gps.satCnoCount == 0) {
         return;
@@ -176,18 +178,18 @@ void integrityUpdate(const GpsData& gps, IntegrityStatus& status) {
     evaluateSpoofing(gps, status);
     evaluateThreatLevel(status);
 
-    // Issue 7: on a rising threat-level transition, publish a standalone
-    // DetectionEvent so the alert handler can sound on jam/spoof even when
-    // no RF candidate is active. The candidate engine still attaches GNSS
-    // evidence for score boosting when RF is correlated (see gnssBoost
-    // comment in detection_engine.cpp) — this path is additive, not a
-    // replacement.
-    if (status.threatLevel > lastEmittedThreatLevel) {
+    // Publish standalone GNSS events on every level transition so alertTask
+    // can both raise and retire GNSS-only alert state. The candidate engine
+    // still attaches GNSS evidence for score boosting when RF is correlated
+    // (see gnssBoost comment in detection_engine.cpp) - this queue path is
+    // additive, not a replacement.
+    if (status.threatLevel != lastEmittedThreatLevel) {
         emitGnssDetectionEvent(status.threatLevel, status);
         // Issue 1: GNSS anomaly during CAD warmup disqualifies all pending
-        // ambient taps — a jam/spoof event at boot is almost certainly
+        // ambient taps - a jam/spoof event at boot is almost certainly
         // correlated with the arriving drone's RC signal.
-        if (cadWarmupInProgress()) {
+        if (status.threatLevel > lastEmittedThreatLevel &&
+            cadWarmupInProgress()) {
             markPendingAmbientCorroboration(0.0f);
         }
     }

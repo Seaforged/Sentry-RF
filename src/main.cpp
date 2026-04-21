@@ -279,12 +279,17 @@ static void loRaScanTask(void* param) {
             xSemaphoreGive(stateMutex);
         }
 
-        // Evaluate threat with current cached state (no fresh sweep this cycle)
+        // Evaluate candidate-engine threat from RF/GNSS-correlated evidence,
+        // then fold in standalone GNSS integrity state so display/logger/LED
+        // reflect the same effective threat that alertTask is now tracking.
         ThreatLevel threat = detectionEngineAssess(snapGps, snapIntegrity);
+        ThreatLevel combinedThreat = threat;
+        ThreatLevel gnssThreat = (ThreatLevel)snapIntegrity.threatLevel;
+        if (gnssThreat > combinedThreat) combinedThreat = gnssThreat;
 
         // Store threat + CAD results into shared state
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            systemState.threatLevel    = threat;
+            systemState.threatLevel    = combinedThreat;
             systemState.cadDiversity   = cadFsk.diversityCount;
             systemState.cadConfirmed   = cadFsk.confirmedCadCount;
             systemState.cadTotalTaps   = cadFsk.totalActiveTaps;
@@ -341,8 +346,11 @@ static void loRaScanTask(void* param) {
             detectionEngineIngestSweep(localResult, nullptr);
 #endif
             threat = detectionEngineAssess(snapGps, snapIntegrity);
+            combinedThreat = threat;
+            gnssThreat = (ThreatLevel)snapIntegrity.threatLevel;
+            if (gnssThreat > combinedThreat) combinedThreat = gnssThreat;
             if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                systemState.threatLevel    = threat;
+                systemState.threatLevel    = combinedThreat;
                 systemState.fastScore      = detectionEngineGetFastScore();
                 systemState.confirmScore   = detectionEngineGetConfirmScore();
                 systemState.anchorFreq     = detectionEngineGetAnchorFreq();
@@ -382,7 +390,7 @@ static void loRaScanTask(void* param) {
                               cadDone - cycleStart,
                               cycleEnd - cadDone,
                               cycleEnd - cycleStart,
-                              threatLevelStr(threat));
+                              threatLevelStr(combinedThreat));
                 scannerPrintCSV(localResult);
                 Serial.printf("[SCAN] Peak: %.1f MHz @ %.1f dBm (%lu ms)\n",
                               localResult.peakFreq, localResult.peakRSSI,
@@ -433,7 +441,7 @@ static void loRaScanTask(void* param) {
                 }
             } else {
                 Serial.printf("[SCAN] CAD:%lums | Threat: %s\n",
-                              cadDone - cycleStart, threatLevelStr(threat));
+                              cadDone - cycleStart, threatLevelStr(combinedThreat));
             }
 
             // Phase E: per-band visibility — subConf (sub-GHz confirmed CAD,

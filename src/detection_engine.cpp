@@ -1099,17 +1099,38 @@ void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan
                                       OFDM_PLATEAU_PERSIST_CYCLES));
         }
         if (plateauConsecutive >= OFDM_PLATEAU_PERSIST_CYCLES) {
-            // Attach bwWide to the best active sub-GHz candidate — same
-            // "confirmer, never seeds" rule as the 2.4 GHz evidence path
-            // at extractPeaks24. No sub-GHz candidate → no attachment.
+            // Attach bwWide to one lone/dominant sub-GHz candidate — same
+            // confirmer-only association rule used by cad24/proto24. A
+            // single wide 2.4 GHz plateau must not boost every candidate in
+            // a cluttered ISM environment.
             uint32_t nowMs2 = (uint32_t)millis();
-            for (uint8_t c = 0; c < MAX_CANDIDATES; c++) {
-                DetectionCandidate& cand = candidatePool[c];
+            int liveSubGHzCount = 0;
+            DetectionCandidate* bestSubGHz = nullptr;
+            uint8_t bestFast = 0;
+            uint8_t secondFast = 0;
+            for (uint8_t i = 0; i < MAX_CANDIDATES; i++) {
+                DetectionCandidate& cand = candidatePool[i];
                 if (!cand.active || !(cand.bandMask & 0x01)) continue;
-                refreshEvidence(cand.bwWide,
+                if ((nowMs2 - cand.lastSeenMs) > CAND_ASSOC_24_TTL_MS) continue;
+                liveSubGHzCount++;
+                uint8_t f = computeFastScore(cand, nowMs2);
+                if (f > bestFast) {
+                    secondFast = bestFast;
+                    bestFast = f;
+                    bestSubGHz = &cand;
+                } else if (f > secondFast) {
+                    secondFast = f;
+                }
+            }
+            bool canAttachPlateau = (liveSubGHzCount == 1) ||
+                                    (liveSubGHzCount >= 2 &&
+                                     (uint16_t)bestFast >= (uint16_t)secondFast + 15);
+            if (canAttachPlateau && bestSubGHz &&
+                candidateCanAccept24Confirmer(*bestSubGHz, nowMs2)) {
+                refreshEvidence(bestSubGHz->bwWide,
                                 (uint8_t)WEIGHT_CONFIRM_BW_WIDE,
                                 TTL_BW_WIDE_MS, nowMs2, /*ready=*/true);
-                cand.bandMask |= 0x02;
+                bestSubGHz->bandMask |= 0x02;
             }
         }
     }
@@ -1560,6 +1581,14 @@ ThreatLevel detectionEngineAssess(const GpsData& gps, const IntegrityStatus& int
             bool have = false;
             if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                 snap = systemState;
+                snap.threatLevel = currentThreat;
+                snap.confidenceScore = lastScore;
+                snap.fastScore = lastFastScore;
+                snap.confirmScore = lastConfirmScore;
+                snap.anchorFreq = lastAnchorFreq;
+                snap.bandMask = lastBandMask;
+                snap.hasCandidate = lastHasCandidate;
+                snap.candidateCount = lastCandidateCount;
                 xSemaphoreGive(stateMutex);
                 have = true;
             }

@@ -444,16 +444,22 @@ void wifiScanTask(void* param) {
         while (xQueueReceive(wifiPacketQueue, &frame, pdMS_TO_TICKS(5)) == pdTRUE) {
             const char* droneName = identifyDroneMAC(frame.srcMAC);
             uint16_t ieDataOffset = 0, ieDataLen = 0;
-            // Issue 5: beacons (0x80) carry RID as a vendor IE — walk them
-            // via findRemoteIdIE as before. Action frames (0xD0) use the NAN
-            // Service Discovery Frame format, which has a completely
-            // different structure; route them to the NAN-aware decoder.
+            // Beacons (0x80) carry RID as a vendor IE; action frames (0xD0)
+            // use NAN-SDF and must be positively decoded before they count as
+            // RID. Treating every action frame as "RID but undecoded" creates
+            // false advisories on ordinary WiFi action traffic.
             bool isBeaconRID = (frame.frameType == 0x80) &&
                                findRemoteIdIE(frame, &ieDataOffset, &ieDataLen);
-            bool isActionFrame = (frame.frameType == 0xD0);
-            bool isRemoteId = isBeaconRID || isActionFrame;
+            DecodedRID nanRid = {};
+            bool fromNan = false;
+            bool nanRidValid = false;
+            if (frame.frameType == 0xD0) {
+                fromNan = decodeNanActionRID(frame, nanRid);
+                nanRidValid = fromNan && nanRid.valid;
+            }
+            bool shouldProcessRid = isBeaconRID || nanRidValid;
 
-            if (droneName != nullptr || isRemoteId) {
+            if (droneName != nullptr || shouldProcessRid) {
                 DetectionEvent event = {};
                 event.source = DET_SOURCE_WIFI;
                 // Issue 2: default to ADVISORY. WARNING is promoted only on
@@ -465,19 +471,18 @@ void wifiScanTask(void* param) {
                 event.rssi = frame.rssi;
                 event.timestamp = millis();
 
-                if (isRemoteId) {
+                if (shouldProcessRid) {
                     // Phase J + Issue 5: dispatch by frame type. Beacon uses
                     // the vendor-IE walker; action frame uses NAN-SDF parser.
                     // Either path yields a DecodedRID; ridValid gates WARNING
                     // promotion and systemState flipping.
                     DecodedRID rid;
                     bool decoded = false;
-                    bool fromNan = false;
                     if (isBeaconRID) {
                         decoded = decodeBeaconRID(frame, ieDataOffset, ieDataLen, rid);
-                    } else if (isActionFrame) {
-                        decoded = decodeNanActionRID(frame, rid);
-                        fromNan = decoded;
+                    } else if (nanRidValid) {
+                        rid = nanRid;
+                        decoded = true;
                     }
                     bool ridValid = decoded && rid.valid;
 
