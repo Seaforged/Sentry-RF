@@ -169,6 +169,33 @@ void displayFatalError(Adafruit_SSD1306& disp, const char* line1, const char* li
     disp.display();
 }
 
+// Phase K: boot self-test summary screen. Three status lines under the
+// version banner, using the same header pattern as the other screens.
+void displayBootSummary(Adafruit_SSD1306& disp, bool radioOK, bool antennaOK,
+                        const char* gpsLine) {
+    disp.clearDisplay();
+    disp.setTextSize(1);
+    disp.setTextColor(SSD1306_WHITE);
+
+    // Banner uses the live FW_VERSION rather than a hardcoded "v2.0" so
+    // version bumps don't leave this screen out of sync.
+    disp.setCursor(0, 0);
+    disp.printf("%s v%s", FW_NAME, FW_VERSION);
+    disp.drawFastHLine(0, 9, SCREEN_WIDTH, SSD1306_WHITE);
+
+    disp.setCursor(0, 16);
+    disp.printf("Radio:   %s",   radioOK   ? "OK" : "FAIL");
+    disp.setCursor(0, 28);
+    disp.printf("Antenna: %s",   antennaOK ? "OK" : "WARN");
+    disp.setCursor(0, 40);
+    disp.printf("GPS:     %s",   gpsLine);
+
+    disp.setCursor(0, 54);
+    disp.print("Self-test complete");
+
+    disp.display();
+}
+
 void displayWarning(Adafruit_SSD1306& disp, const char* line1, const char* line2) {
     disp.clearDisplay();
     disp.setTextSize(1);

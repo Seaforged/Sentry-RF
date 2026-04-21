@@ -34,6 +34,13 @@ void displayFatalError(Adafruit_SSD1306& disp, const char* line1, const char* li
 // display task overwrites it with the dashboard.
 void displayWarning(Adafruit_SSD1306& disp, const char* line1, const char* line2 = nullptr);
 
+// Phase K: boot self-test summary. Caller delays 3 s after rendering so the
+// operator can read the result before the main UI takes over. radioOK /
+// antennaOK are the self-test outcomes; gpsLine is a caller-provided status
+// string (usually "Acquiring...") since GPS is checked asynchronously.
+void displayBootSummary(Adafruit_SSD1306& disp, bool radioOK, bool antennaOK,
+                        const char* gpsLine);
+
 // Screen 0: Dashboard summary — all-in-one glance
 void screenDashboard(Adafruit_SSD1306& disp, const SystemState& state, int page);
 

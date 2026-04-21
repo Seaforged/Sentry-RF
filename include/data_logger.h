@@ -17,4 +17,10 @@ void loggerFlush();
 // label and a pre-formatted "HH:MM:SS" uptime string.
 void loggerLogModeChange(const char* modeLabel, const char* uptimeHMS);
 
+// Phase K: one-shot boot self-test event emitted right after loggerInit.
+// radioOK / antennaOK are the self-test outcomes, boot is the persistent
+// boot counter from RTC memory. GPS result isn't included because it's
+// evaluated asynchronously after the self-test completes.
+void loggerLogSelfTest(bool radioOK, bool antennaOK, uint32_t bootCount);
+
 #endif // DATA_LOGGER_H

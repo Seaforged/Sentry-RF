@@ -1,5 +1,6 @@
 #include "data_logger.h"
 #include "board_config.h"
+#include "version.h"
 #include <Arduino.h>
 
 static uint32_t writeCount = 0;
@@ -159,6 +160,18 @@ void loggerLogModeChange(const char* modeLabel, const char* uptimeHMS) {
     }
 }
 
+void loggerLogSelfTest(bool radioOK, bool antennaOK, uint32_t bootCount) {
+    if (jsonlFile) {
+        jsonlFile.printf("{\"event\":\"selftest\","
+                         "\"radio\":\"%s\",\"antenna\":\"%s\","
+                         "\"fw\":\"%s\",\"boot\":%u}\n",
+                         radioOK   ? "OK" : "FAIL",
+                         antennaOK ? "OK" : "WARN",
+                         FW_VERSION, (unsigned)bootCount);
+        jsonlFile.flush();
+    }
+}
+
 #endif // BOARD_T3S3
 
 // ── Heltec V3: SPIFFS logging ──────────────────────────────────────────────
@@ -230,6 +243,16 @@ void loggerLogModeChange(const char* modeLabel, const char* uptimeHMS) {
     if (logFile) {
         logFile.printf("# mode_change,%lu,%s,%s\n",
                        millis(), modeLabel, uptimeHMS);
+        logFile.flush();
+    }
+}
+
+void loggerLogSelfTest(bool radioOK, bool antennaOK, uint32_t bootCount) {
+    if (logFile) {
+        logFile.printf("# selftest,%s,%s,%s,%u\n",
+                       radioOK   ? "OK" : "FAIL",
+                       antennaOK ? "OK" : "WARN",
+                       FW_VERSION, (unsigned)bootCount);
         logFile.flush();
     }
 }

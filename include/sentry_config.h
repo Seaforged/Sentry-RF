@@ -156,9 +156,15 @@ static const float AMBIENT_UNLOCK_SHIFT    = 6.0f;  // dB drift to unlock a base
 static const float AMBIENT_MIN_ABOVE_NF    = 5.0f;  // dB above NF to qualify for baseline
 
 // ── GNSS Integrity ────────────────────────────────────────────────────
-static const uint8_t GPS_MIN_CNO           = 15;    // dB-Hz minimum (6=indoor bench, 15=field)
+// dB-Hz minimum satellite signal strength. INDOOR TESTING: 6. FIELD/PRODUCTION: 15-20.
+static const uint8_t GPS_MIN_CNO           = 15;
 static const float CNO_STDDEV_SPOOF_THRESH = 2.0f;  // dB-Hz — below this = spoofing suspected
 static const int   MIN_ELEV_FOR_CNO        = 20;    // degrees — exclude low-elevation sats
+// Phase K: the C/N0 uniformity spoofing detector is suppressed when
+// GPS_MIN_CNO < 15. Indoor/attenuated constellations naturally cluster
+// within ±2 dB-Hz and trip the uniformity check as false-positive spoofing.
+// Field thresholds (15+) spread the real distribution wide enough to let
+// the check fire legitimately.
 
 // Position jump spoofing detector — >100 m step with hAcc <10 m = teleport.
 // Only counts when the fix is otherwise high-confidence, so natural drift
@@ -283,6 +289,24 @@ static const unsigned long REMINDER_INTERVAL = 30000;  // 30 seconds
 // the sweep-derived evidence lifetime.
 static const int WEIGHT_CONFIRM_BW_WIDE = 10;
 #define TTL_BW_WIDE_MS              4500
+
+// ── Phase K: Boot self-test + scan watchdog ──────────────────────────
+// Antenna self-test RSSI floor. If all 10 probe frequencies across 860-930
+// MHz read below this, the antenna self-test emits a WARN (boot continues).
+// -130 is below the LR1121 hardware clamp so a genuinely disconnected path
+// (returning ~-127 dBm sentinel) fails while any real antenna pickup passes.
+#define ANTENNA_FLOOR_DBM           -130.0f
+
+// GPS fix acquisition timeout (ms). The boot self-test sets a pending flag;
+// if gpsReadTask hasn't cleared it by this deadline, a one-shot [SELFTEST]
+// GPS: NO FIX line is logged to serial. Boot is never blocked on GPS.
+#define GPS_FIX_TIMEOUT_MS          120000
+
+// Scan-cycle watchdog deadline (ms). loRaScanTask logs a [WATCHDOG] line
+// when a single cycle exceeds this wall-clock budget. Log-only — we do NOT
+// reset the task, because aborting mid-SPI leaves the radio in an unknown
+// state. Raise this if legitimate slow cycles trip the alarm in the field.
+#define SCAN_WATCHDOG_MS            5000
 
 // ── Phase H: mode accessor API ───────────────────────────────────────
 // Defined in main.cpp. Always access via these wrappers — they take

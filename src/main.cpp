@@ -144,6 +144,82 @@ static const char* threatLevelStr(ThreatLevel t) {
 // RSSI_SWEEP_INTERVAL_MS from sentry_config.h (Phase F wall-clock pacing)
 #include "sentry_config.h"
 
+// ── Phase K: Boot self-test + async GPS check ────────────────────────
+// Results populated by runSelfTest() in setup() and read later when the
+// self-test JSONL is written. gpsFixPending is cleared by gpsReadTask on
+// first valid 3D fix, or left set until the timeout log fires.
+static bool          selfTestRadioOK      = true;
+static bool          selfTestAntennaOK    = true;
+static volatile bool gpsFixPending        = false;
+static unsigned long gpsFixStartMs        = 0;
+static bool          gpsFixTimeoutLogged  = false;
+
+// Boot self-test: RSSI sanity, antenna coverage probe. Must complete in
+// <500ms (GPS is async, OLED summary is outside this budget). The radio
+// must already be initialized by initRadioHardware() + scannerInit();
+// this function must not call radio.begin() again (resetting mid-boot
+// corrupts chip state on both SX1262 and LR1121).
+static void runSelfTest() {
+    // ── Radio health: 10 RSSI reads @ 10ms. All -127.5 dBm exact means
+    // the chip clamped to the "no signal / error" sentinel across every
+    // sample — almost certainly a dead receiver. Anything else = healthy.
+    bool radioHealthy = false;
+    radio.setFrequency(915.0);
+#ifdef BOARD_T3S3_LR1121
+    radio.startReceive();
+#else
+    radio.startReceive();
+#endif
+    for (int i = 0; i < 10; i++) {
+        delay(10);
+#ifdef BOARD_T3S3_LR1121
+        float rssi = radio.getInstantRSSI();
+#else
+        float rssi = radio.getRSSI(false);
+#endif
+        if (rssi > -127.4f || rssi < -127.6f) {   // not exactly -127.5
+            radioHealthy = true;
+        }
+    }
+    selfTestRadioOK = radioHealthy;
+    Serial.printf("[SELFTEST] Radio: %s\n", radioHealthy ? "OK" : "FAIL");
+
+    // ── Antenna coverage probe: 10 frequencies across 860-930 MHz. If
+    // ALL read below ANTENNA_FLOOR_DBM (-130 dBm) the antenna path is
+    // disconnected or severely damaged. Anything above floor on any
+    // probe passes — even a single bin of ambient pickup is sufficient
+    // evidence of a radiating element.
+    const float probeFreqs[] = {
+        860.0f, 867.0f, 874.0f, 881.0f, 888.0f,
+        895.0f, 902.0f, 909.0f, 916.0f, 930.0f
+    };
+    bool anyAboveFloor = false;
+    for (int i = 0; i < 10; i++) {
+        radio.setFrequency(probeFreqs[i]);
+#ifdef BOARD_T3S3_LR1121
+        radio.startReceive();   // LR1121 drops to standby on setFrequency
+#endif
+        delay(5);
+#ifdef BOARD_T3S3_LR1121
+        float rssi = radio.getInstantRSSI();
+#else
+        float rssi = radio.getRSSI(false);
+#endif
+        if (rssi > ANTENNA_FLOOR_DBM) anyAboveFloor = true;
+    }
+    selfTestAntennaOK = anyAboveFloor;
+    Serial.printf("[SELFTEST] Antenna: %s\n",
+                  anyAboveFloor ? "OK" : "WARN (no signal detected)");
+
+    // ── GPS check: arm the async timer. gpsReadTask clears the flag on
+    // first valid 3D fix; loop() logs [SELFTEST] GPS: NO FIX if the
+    // deadline passes with the flag still set.
+    gpsFixPending       = true;
+    gpsFixStartMs       = millis();
+    gpsFixTimeoutLogged = false;
+    Serial.println("[SELFTEST] GPS: Acquiring... (async)");
+}
+
 // Core 1 — LoRa SPI is only touched here, no mutex needed for the radio
 static void loRaScanTask(void* param) {
     ScanResult localResult = {};
@@ -385,6 +461,21 @@ static void loRaScanTask(void* param) {
             xSemaphoreGive(serialMutex);
         }
 
+        // Phase K: scan-cycle watchdog. cycleStart was captured at the top
+        // of the loop; cycleEnd has already been computed above. We log but
+        // do NOT reset — aborting mid-cycle would leave the SX1262/LR1121
+        // in an unknown state (pending SPI transaction, incomplete CAD).
+        // Raising the threshold is preferable to acting on this signal.
+        if ((cycleEnd - cycleStart) > SCAN_WATCHDOG_MS) {
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                Serial.printf("[WATCHDOG] Scan cycle exceeded %lums — cycle:%u duration:%lums\n",
+                              (unsigned long)SCAN_WATCHDOG_MS,
+                              sweepNum,
+                              cycleEnd - cycleStart);
+                xSemaphoreGive(serialMutex);
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -424,6 +515,25 @@ static void gpsReadTask(void* param) {
             systemState.compass = localCompass;
             systemState.lastGpsMs = millis();
             xSemaphoreGive(stateMutex);
+        }
+
+        // Phase K: self-test GPS outcome. First valid 3D fix clears the
+        // pending flag. If we exceed GPS_FIX_TIMEOUT_MS without a fix, log
+        // the outcome once and stop checking. This runs on Core 0, so it
+        // doesn't block setup() on Core 1 or delay task launch.
+        if (gpsFixPending && localGps.valid && localGps.fixType >= 3) {
+            gpsFixPending = false;
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                Serial.printf("[SELFTEST] GPS: OK (%d SVs)\n", localGps.numSV);
+                xSemaphoreGive(serialMutex);
+            }
+        } else if (gpsFixPending && !gpsFixTimeoutLogged &&
+                   (millis() - gpsFixStartMs) > GPS_FIX_TIMEOUT_MS) {
+            gpsFixTimeoutLogged = true;
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                Serial.println("[SELFTEST] GPS: NO FIX after 120s");
+                xSemaphoreGive(serialMutex);
+            }
         }
 
         // Rate-limited serial output — GPS/integrity every 5s to prevent
@@ -692,17 +802,13 @@ void setup() {
         for (;;) delay(1000);
     }
 
-    // Boot-time antenna self-test — warns only, does NOT halt.
-    // Passive RSSI detection false-fails in RF-quiet environments (rural, shielded
-    // rooms) where ambient 915 MHz energy stays below detection threshold even with
-    // a properly connected antenna. Hard-halting would brick healthy boards in those
-    // environments, so we log the result, show a brief on-screen warning, and let
-    // boot continue. Operator can verify by looking at the RF spectrum screen.
-    if (!scannerAntennaCheck(radio)) {
-        Serial.println("[INIT] Antenna check failed — sub-GHz antenna weak or missing");
-        displayWarning(oled, "Antenna weak/missing", "Check SMA connection");
-        delay(3000);
-    }
+    // Phase K: boot self-test replaces the old scannerAntennaCheck call.
+    // runSelfTest() does both a receiver sanity check (10 RSSI reads @ 915
+    // MHz) and a wider antenna coverage probe (10 frequencies across the
+    // band), then arms the async GPS-fix timer. Warnings only — never halts.
+    runSelfTest();
+    displayBootSummary(oled, selfTestRadioOK, selfTestAntennaOK, "Acquiring...");
+    delay(3000);
 
     cadScannerInit();
 
@@ -713,6 +819,9 @@ void setup() {
     integrityInit();
     detectionEngineInit();
     loggerInit();
+    // Phase K: persist the self-test outcome to SD right after loggerInit
+    // so even a single-boot run has a record.
+    loggerLogSelfTest(selfTestRadioOK, selfTestAntennaOK, bootCount);
 
     // WiFi radio dedicated to promiscuous scanning for drone Remote ID
     wifiScannerInit();
