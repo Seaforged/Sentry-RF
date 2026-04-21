@@ -25,11 +25,16 @@ static void loggerMutexInit() {
     }
 }
 
-// Try to acquire the logger mutex. Returns true if acquired OR if the
-// mutex doesn't yet exist (pre-init single-threaded caller is safe).
+// Issue 12: block on the mutex until acquired (portMAX_DELAY) rather than
+// the previous 50 ms timeout that silently dropped rows under contention.
+// With portMAX_DELAY the only bound on latency is the duration of the
+// holder's I/O, which is itself bounded by SD write speed (single-digit
+// ms typical). Silent drops masked real data loss that would have hit
+// analysts via `field_analyzer.py` later.
 static bool loggerLock() {
     if (loggerMutex == nullptr) return true;
-    return xSemaphoreTake(loggerMutex, pdMS_TO_TICKS(50)) == pdTRUE;
+    xSemaphoreTake(loggerMutex, portMAX_DELAY);
+    return true;
 }
 
 static void loggerUnlock() {
@@ -60,47 +65,39 @@ void emitZmqJson(const SystemState& state, const char* eventType) {
         return;  // unknown event type — drop silently
     }
 
-    // Take serialMutex so the printf doesn't interleave with concurrent
-    // output from other tasks (LoRa scan CSV, alert ESCALATION, etc.).
-    // Short timeout — if we can't get the mutex quickly, skip this emit
-    // rather than block the caller (threat transitions are time-critical).
-    bool locked = false;
-    if (serialMutex &&
-        xSemaphoreTake(serialMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-        locked = true;
-    }
-
-    // Prefix is EXACTLY "[ZMQ] " (6 chars) — the Python bridge strips
-    // with line[6:] so any change here breaks the wire format.
+    // Prefix is EXACTLY "[ZMQ] " (6 chars) — the Python bridge strips with
+    // line[6:] so any change here breaks the wire format. Issue 3 fix:
+    // route through SERIAL_SAFE (blocking portMAX_DELAY) instead of the
+    // prior take-with-timeout-and-fallback pattern — the fallback printed
+    // without the mutex on contention, which could interleave bytes into
+    // the JSON frame and corrupt the ZMQ pipe.
     if (strcmp(eventType, "threat") == 0) {
-        Serial.printf("[ZMQ] {\"type\":\"threat\",\"ts\":%lu,\"threat\":%d,"
-                      "\"score\":%d,\"freq_mhz\":%.1f,\"rssi_dbm\":%.1f,"
-                      "\"lat\":%.6f,\"lon\":%.6f,\"alt_m\":%d,"
-                      "\"cad_conf\":%d,\"div\":%d,\"mode\":\"%s\"}\n",
-                      now,
-                      (int)state.threatLevel,
-                      state.confidenceScore,
-                      state.spectrum.peakFreq, state.spectrum.peakRSSI,
-                      state.gps.latDeg7 / 1e7,
-                      state.gps.lonDeg7 / 1e7,
-                      (int)(state.gps.altMM / 1000),
-                      state.cadConfirmed,
-                      state.cadDiversity,
-                      modeShortLabel(modeGet()));
+        SERIAL_SAFE(Serial.printf("[ZMQ] {\"type\":\"threat\",\"ts\":%lu,\"threat\":%d,"
+                                  "\"score\":%d,\"freq_mhz\":%.1f,\"rssi_dbm\":%.1f,"
+                                  "\"lat\":%.6f,\"lon\":%.6f,\"alt_m\":%d,"
+                                  "\"cad_conf\":%d,\"div\":%d,\"mode\":\"%s\"}\n",
+                                  now,
+                                  (int)state.threatLevel,
+                                  state.confidenceScore,
+                                  state.spectrum.peakFreq, state.spectrum.peakRSSI,
+                                  state.gps.latDeg7 / 1e7,
+                                  state.gps.lonDeg7 / 1e7,
+                                  (int)(state.gps.altMM / 1000),
+                                  state.cadConfirmed,
+                                  state.cadDiversity,
+                                  modeShortLabel(modeGet())));
     } else {  // "rid" (checked above)
         const DecodedRID& r = state.lastRID;
-        Serial.printf("[ZMQ] {\"type\":\"rid\",\"ts\":%lu,\"uas_id\":\"%s\","
-                      "\"uas_type\":\"%s\",\"d_lat\":%.4f,\"d_lon\":%.4f,"
-                      "\"d_alt_m\":%.1f,\"o_lat\":%.4f,\"o_lon\":%.4f,"
-                      "\"spd_mps\":%.1f,\"hdg\":%u}\n",
-                      now,
-                      r.uasID, r.uasIDType,
-                      r.droneLat, r.droneLon, r.droneAltM,
-                      r.operatorLat, r.operatorLon,
-                      r.speedMps, (unsigned)r.headingDeg);
+        SERIAL_SAFE(Serial.printf("[ZMQ] {\"type\":\"rid\",\"ts\":%lu,\"uas_id\":\"%s\","
+                                  "\"uas_type\":\"%s\",\"d_lat\":%.4f,\"d_lon\":%.4f,"
+                                  "\"d_alt_m\":%.1f,\"o_lat\":%.4f,\"o_lon\":%.4f,"
+                                  "\"spd_mps\":%.1f,\"hdg\":%u}\n",
+                                  now,
+                                  r.uasID, r.uasIDType,
+                                  r.droneLat, r.droneLon, r.droneAltM,
+                                  r.operatorLat, r.operatorLon,
+                                  r.speedMps, (unsigned)r.headingDeg));
     }
-
-    if (locked) xSemaphoreGive(serialMutex);
 #else
     (void)state;
     (void)eventType;

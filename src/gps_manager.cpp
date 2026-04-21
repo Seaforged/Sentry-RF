@@ -201,13 +201,13 @@ static void readNavSat(GpsData& data) {
         int16_t elev = gps.packetUBXNAVSAT->data.blocks[i].elev;
         uint8_t cno  = gps.packetUBXNAVSAT->data.blocks[i].cno;
 
-        // Phase K/rev: filter satellites at MIN_ELEV_FOR_CNO (20° production).
-        // Low-elevation sats suffer multipath and produce uniformity-check
-        // false-positives in the C/N0 spoof detector. The 5° floor used pre-
-        // audit admitted noisy data that widened the stddev and masked real
-        // spoofing. Production threshold matches sentry_config.h for
-        // consistency with the spoofing gate.
-        if (elev >= MIN_ELEV_FOR_CNO && cno > 0) {
+        // Phase K + Issue 7: filter satellites at MIN_ELEV_FOR_CNO (20° prod)
+        // AND cno >= GPS_MIN_CNO (15 dB-Hz prod). Low-elev sats suffer
+        // multipath; low-SNR sats just add noise to the uniformity calc.
+        // Both constraints match the sentry_config.h thresholds used by the
+        // downstream spoof/jam gates, so sats that wouldn't count toward a
+        // threat assessment don't distort the stddev that drives it either.
+        if (elev >= MIN_ELEV_FOR_CNO && cno >= GPS_MIN_CNO) {
             data.satCno[data.satCnoCount++] = (float)cno;
         }
     }

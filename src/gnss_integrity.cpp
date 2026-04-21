@@ -1,7 +1,11 @@
 #include "gnss_integrity.h"
 #include "sentry_config.h"
+#include "detection_types.h"
+#include "alert_handler.h"   // Issue 8: alertQueueDropInc()
+#include "cad_scanner.h"     // Issue 1: warmup corroboration
 #include <Arduino.h>
 #include <math.h>
+#include <string.h>
 
 static float cnoHistory[CNO_HISTORY_SIZE];
 static int cnoHistoryHead = 0;
@@ -120,6 +124,35 @@ static void evaluateThreatLevel(IntegrityStatus& status) {
     }
 }
 
+// Issue 7: track the last emitted threat level so we only publish an
+// event on rising transitions (CLEAR→ADVISORY, ADVISORY→WARNING,
+// WARNING→CRITICAL). Decays and steady-state updates don't flood the
+// alert queue. File-static because integrityUpdate is the single writer.
+static uint8_t lastEmittedThreatLevel = 0;
+
+static void emitGnssDetectionEvent(uint8_t level, const IntegrityStatus& status) {
+    if (detectionQueue == nullptr) return;
+    DetectionEvent event = {};
+    event.source    = DET_SOURCE_GNSS;
+    event.severity  = level;
+    event.frequency = 0.0f;                 // GNSS events have no RF freq
+    event.rssi      = (float)status.cnoStdDev;
+    event.timestamp = millis();
+    // Description lists the specific indicator(s) that fired. Multiple
+    // indicators can coexist (e.g. jam + spoof).
+    const char* tag =
+        status.jammingDetected    ? "jam"
+      : status.positionJumpDetected ? "position-jump"
+      : status.cnoAnomalyDetected ? "C/N0 uniformity"
+      : status.spoofingDetected   ? "spoof"
+      : "integrity";
+    snprintf(event.description, sizeof(event.description),
+             "GNSS: %s (level %u)", tag, (unsigned)level);
+    if (xQueueSend(detectionQueue, &event, pdMS_TO_TICKS(5)) != pdTRUE) {
+        alertQueueDropInc();
+    }
+}
+
 void integrityUpdate(const GpsData& gps, IntegrityStatus& status) {
     // Reset output fields — prevents stale true values carrying across cycles
     status.jammingDetected    = false;
@@ -142,6 +175,23 @@ void integrityUpdate(const GpsData& gps, IntegrityStatus& status) {
     evaluateJamming(gps, status);
     evaluateSpoofing(gps, status);
     evaluateThreatLevel(status);
+
+    // Issue 7: on a rising threat-level transition, publish a standalone
+    // DetectionEvent so the alert handler can sound on jam/spoof even when
+    // no RF candidate is active. The candidate engine still attaches GNSS
+    // evidence for score boosting when RF is correlated (see gnssBoost
+    // comment in detection_engine.cpp) — this path is additive, not a
+    // replacement.
+    if (status.threatLevel > lastEmittedThreatLevel) {
+        emitGnssDetectionEvent(status.threatLevel, status);
+        // Issue 1: GNSS anomaly during CAD warmup disqualifies all pending
+        // ambient taps — a jam/spoof event at boot is almost certainly
+        // correlated with the arriving drone's RC signal.
+        if (cadWarmupInProgress()) {
+            markPendingAmbientCorroboration(0.0f);
+        }
+    }
+    lastEmittedThreatLevel = status.threatLevel;
 }
 
 void integrityPrintStatus(const IntegrityStatus& status, const GpsData& gps) {

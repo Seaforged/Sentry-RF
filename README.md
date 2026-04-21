@@ -17,7 +17,7 @@ SENTRY-RF is an open-source counter-UAS trip-wire that detects drone control lin
 
 **WiFi Remote ID** — Parses ASTM F3411 WiFi Beacon frames in real-time using the ESP32-S3's built-in WiFi in promiscuous mode. Identifies drones broadcasting FAA-mandated Remote ID with no extra hardware.
 
-**GNSS Integrity Monitoring** — Reads u-blox M10 jamming indicators, spoofing detection state, and per-satellite C/N0 quality via UBX binary protocol. Detects GPS jamming and spoofing attacks that drones or electronic warfare systems may produce.
+**GNSS Integrity Monitoring** — Reads u-blox M10 jamming indicators, spoofing detection state, and per-satellite C/N0 uniformity via UBX binary protocol. Emits standalone alerts on rising GNSS threat level (jam / spoof / position-jump / C/N0 uniformity anomaly); the candidate engine additionally uses GNSS anomalies as a confirm-score boost when RF detection has been active in the last 30 s. Position-jump detection compares consecutive NAV-PVT reports for >100 m teleports with tight hAcc — a signature of rebroadcast spoofing.
 
 **Threat Classification** — Correlates RF detections with GNSS anomalies to produce actionable threat levels: `CLEAR → ADVISORY → WARNING → CRITICAL`. Buzzer alerts on WARNING+.
 

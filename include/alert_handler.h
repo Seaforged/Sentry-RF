@@ -17,4 +17,9 @@ bool alertIsMuted();
 bool alertIsAcknowledged();
 unsigned long alertMuteRemainingMs();
 
+// Issue 8: producers call this when xQueueSend to detectionQueue fails
+// (5 ms timeout exceeded, queue genuinely full). alertTask logs the
+// accumulated count once per 10 s.
+void alertQueueDropInc();
+
 #endif // ALERT_HANDLER_H

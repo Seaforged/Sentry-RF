@@ -81,6 +81,14 @@ bool cadWarmupComplete();
 void resetDiversityTracker();
 bool cadHwFault();
 
+// Issue 1: probation-table hooks. cadWarmupInProgress() returns true while
+// the ambient-learning window is active. External corroboration markers
+// (WiFi RID, GNSS integrity rise) call markPendingAmbientCorroboration(0)
+// to blanket-disqualify all pending taps. FHSS diversity corroboration is
+// wired internally to recordDiversityHit().
+bool cadWarmupInProgress();
+void markPendingAmbientCorroboration(float freqMHz);
+
 // Run the full fishing pole scan cycle.
 // Called from loRaScanTask every cycle. rssi may be nullptr if no RSSI data yet.
 #ifdef BOARD_T3S3_LR1121

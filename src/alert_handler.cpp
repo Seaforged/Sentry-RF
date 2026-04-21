@@ -44,6 +44,21 @@ static unsigned long _muteStartMs      = 0;
 static unsigned long _lastEscalationMs = 0;
 // MUTE_DURATION_MS, REMINDER_INTERVAL from sentry_config.h
 
+// Issue 8: serialize access to the alert state fields above. displayTask
+// enters here via alertAcknowledge()/alertToggleMute() while alertTask
+// mutates the same fields on the queue drain path — previously racy.
+// alertTask takes the mutex around its read/write blocks; the button-
+// action entry points take it around their whole body. Initialized lazily
+// in alertTask before the main loop so we never dereference nullptr from
+// early boot events.
+static SemaphoreHandle_t alertMutex = nullptr;
+
+// Issue 8 F3: dropped-event counter. Surfaced via serial once per 10 s
+// if non-zero so saturation is visible to the operator / analyst.
+static volatile uint32_t alertQueueDrops   = 0;
+static unsigned long     lastDropLogMs     = 0;
+static const unsigned long DROP_LOG_INTERVAL_MS = 10000;
+
 // ── LED pattern (non-LEDC, uses digitalWrite) ───────────────
 
 static unsigned long ledLastToggleMs = 0;
@@ -103,38 +118,45 @@ static TonePatternType selectPattern(uint8_t source, ThreatLevel level) {
 // ── Public API (called from display task) ───────────────────
 
 void alertAcknowledge() {
-    if (_lastThreat <= THREAT_CLEAR) return;
+    // Issue 8: serialize against alertTask. Safe to guard with nullptr
+    // check — if the mutex hasn't been created yet (pre-task boot), no
+    // other task is running so the state write is race-free by default.
+    if (alertMutex) xSemaphoreTake(alertMutex, portMAX_DELAY);
+
+    if (_lastThreat <= THREAT_CLEAR) {
+        if (alertMutex) xSemaphoreGive(alertMutex);
+        return;
+    }
 
     _isAcknowledged = true;
     _acknowledgedAt = _lastThreat;
     buzzerStop();
+    ThreatLevel snapshot = _lastThreat;
+    if (alertMutex) xSemaphoreGive(alertMutex);
 
-    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        Serial.printf("[ALERT] ACK by operator at %s level\n", threatStr(_lastThreat));
-        xSemaphoreGive(serialMutex);
-    }
+    SERIAL_SAFE(Serial.printf("[ALERT] ACK by operator at %s level\n",
+                              threatStr(snapshot)));
 }
 
 void alertToggleMute() {
+    if (alertMutex) xSemaphoreTake(alertMutex, portMAX_DELAY);
     _isMuted = !_isMuted;
     buzzerSetMuted(_isMuted);
+    bool nowMuted = _isMuted;
+    if (nowMuted) _muteStartMs = millis();
+    if (alertMutex) xSemaphoreGive(alertMutex);
 
-    if (_isMuted) {
-        _muteStartMs = millis();
-        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            Serial.println("[ALERT] MUTED for 5 minutes");
-            xSemaphoreGive(serialMutex);
-        }
+    if (nowMuted) {
+        SERIAL_SAFE(Serial.println("[ALERT] MUTED for 5 minutes"));
     } else {
-        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            Serial.println("[ALERT] UNMUTED");
-            xSemaphoreGive(serialMutex);
-        }
+        SERIAL_SAFE(Serial.println("[ALERT] UNMUTED"));
     }
 }
 
 bool alertIsMuted()          { return _isMuted; }
 bool alertIsAcknowledged()   { return _isAcknowledged; }
+
+void alertQueueDropInc()     { alertQueueDrops++; }
 
 unsigned long alertMuteRemainingMs() {
     if (!_isMuted) return 0;
@@ -147,6 +169,14 @@ unsigned long alertMuteRemainingMs() {
 void alertTask(void* param) {
     DetectionEvent event;
 
+    // Issue 8: create the alert-state mutex before any self-test beep or
+    // queue drain. Public entry points alertAcknowledge / alertToggleMute
+    // can arrive from displayTask on Core 0 as early as the first button
+    // press, so we need the mutex alive before the main loop starts.
+    if (alertMutex == nullptr) {
+        alertMutex = xSemaphoreCreateMutex();
+    }
+
     // Self-test beep on boot
     buzzerInit();
     buzzerPlayPattern(TONE_SELF_TEST);
@@ -157,14 +187,23 @@ void alertTask(void* param) {
     }
 
     for (;;) {
-        // Auto-unmute after timeout
+        // Auto-unmute after timeout — take alertMutex to synchronize with
+        // displayTask's alertToggleMute() writes.
+        xSemaphoreTake(alertMutex, portMAX_DELAY);
+        bool didAutoUnmute = false;
         if (_isMuted && (millis() - _muteStartMs >= MUTE_DURATION_MS)) {
             _isMuted = false;
             buzzerSetMuted(false);
-            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                Serial.println("[ALERT] UNMUTED (timeout)");
-                xSemaphoreGive(serialMutex);
-            }
+            didAutoUnmute = true;
+        }
+        // Snapshot state for systemState mirror under the same lock
+        bool snapMuted      = _isMuted;
+        bool snapAck        = _isAcknowledged;
+        unsigned long snapMuteLeft = alertMuteRemainingMs();
+        xSemaphoreGive(alertMutex);
+
+        if (didAutoUnmute) {
+            SERIAL_SAFE(Serial.println("[ALERT] UNMUTED (timeout)"));
         }
 
         // Read system threat level and update buzzer state
@@ -172,14 +211,17 @@ void alertTask(void* param) {
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
             extern SystemState systemState;
             systemThreat = systemState.threatLevel;
-            systemState.buzzerMuted = _isMuted;
-            systemState.buzzerAcknowledged = _isAcknowledged;
-            systemState.muteRemainingMs = alertMuteRemainingMs();
+            systemState.buzzerMuted        = snapMuted;
+            systemState.buzzerAcknowledged = snapAck;
+            systemState.muteRemainingMs    = snapMuteLeft;
             xSemaphoreGive(stateMutex);
         }
 
-        // Process detection queue
-        if (xQueueReceive(detectionQueue, &event, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // Issue 8 F3: drain the detection queue until empty each pass
+        // instead of taking one event per loop. This keeps up with
+        // bursty producers (RF/WiFi/BLE/GNSS/candidate engine/mode) on
+        // the deepened 32-slot queue without starving.
+        while (xQueueReceive(detectionQueue, &event, pdMS_TO_TICKS(10)) == pdTRUE) {
             ThreatLevel newLevel = (ThreatLevel)event.severity;
 
             // Serial log — suppress (freq, rssi) suffix when fields are
@@ -195,79 +237,108 @@ void alertTask(void* param) {
             } else if (event.rssi < 0.0f) {
                 snprintf(suffix, sizeof(suffix), " (%.1f dBm)", event.rssi);
             }
-            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                Serial.printf("[ALERT] %s %s: %s%s\n",
-                              severityStr(event.severity),
-                              sourceStr(event.source),
-                              event.description,
-                              suffix);
-                xSemaphoreGive(serialMutex);
-            }
+            SERIAL_SAFE(Serial.printf("[ALERT] %s %s: %s%s\n",
+                                      severityStr(event.severity),
+                                      sourceStr(event.source),
+                                      event.description,
+                                      suffix));
 
             // Phase H: COVERT suppresses all audible output.
             bool covert = (modeGet() == MODE_COVERT);
             bool highAlert = (modeGet() == MODE_HIGH_ALERT);
 
-            if (newLevel > _lastThreat) {
-                // ── ESCALATION ──
+            // Issue 8: all writes to _lastThreat / _isAcknowledged /
+            // _lastEscalationMs serialized via alertMutex so concurrent
+            // displayTask button-driven writes don't tear state.
+            xSemaphoreTake(alertMutex, portMAX_DELAY);
+            ThreatLevel prevThreat = _lastThreat;
+            ThreatLevel newLevelLocal = (ThreatLevel)event.severity;
+            bool escalated = false;
+            bool deescalatedToClear = false;
+
+            if (newLevelLocal > prevThreat) {
                 _isAcknowledged = false;
                 _lastEscalationMs = millis();
+                _lastThreat = newLevelLocal;
+                escalated = true;
+            } else if (newLevelLocal == prevThreat && !_isAcknowledged) {
+                // same-level-not-ack'd — escalation timestamp updated by
+                // the actual buzzer branches below under alertMutex
+            } else if (newLevelLocal < prevThreat) {
+                if (newLevelLocal == THREAT_CLEAR) {
+                    _isAcknowledged = false;
+                    _lastThreat = newLevelLocal;
+                    deescalatedToClear = true;
+                } else {
+                    _lastThreat = newLevelLocal;
+                }
+            }
+            xSemaphoreGive(alertMutex);
 
-                if (!covert && newLevel >= THREAT_WARNING) {
-                    TonePatternType pat = selectPattern(event.source, newLevel);
+            // Side effects (buzzer, serial) run outside the alertMutex so
+            // they don't block other state writers. Buzzer patterns are
+            // non-blocking; SERIAL_SAFE uses its own mutex.
+            if (escalated) {
+                if (!covert && newLevelLocal >= THREAT_WARNING) {
+                    TonePatternType pat = selectPattern(event.source, newLevelLocal);
                     buzzerPlayPattern(pat);
                 }
-
-                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    Serial.printf("[ALERT] ESCALATION: %s -> %s — buzzer: %s\n",
-                                  threatStr(_lastThreat), threatStr(newLevel),
-                                  (newLevel >= THREAT_WARNING) ? "ON" : "silent");
-                    xSemaphoreGive(serialMutex);
-                }
-
-                _lastThreat = newLevel;
-
-            } else if (newLevel == _lastThreat && !_isAcknowledged) {
-                // ── SAME LEVEL, NOT ACK'd ──
-                // Phase H HIGH_ALERT: no debounce — fire the full pattern
-                // on every incoming WARNING/CRITICAL so the operator
-                // hears sustained signal immediately rather than after
-                // REMINDER_INTERVAL. COVERT still suppresses everything.
+                SERIAL_SAFE(Serial.printf("[ALERT] ESCALATION: %s -> %s — buzzer: %s\n",
+                                          threatStr(prevThreat),
+                                          threatStr(newLevelLocal),
+                                          (newLevelLocal >= THREAT_WARNING) ? "ON" : "silent"));
+            } else if (newLevelLocal == prevThreat && !snapAck) {
+                // SAME LEVEL, NOT ACK'd — COVERT suppresses all output
+                // ; HIGH_ALERT fires immediately (no debounce); otherwise
+                // wait for REMINDER_INTERVAL before a soft reminder.
                 if (covert) {
                     // no-op
-                } else if (highAlert && newLevel >= THREAT_WARNING &&
+                } else if (highAlert && newLevelLocal >= THREAT_WARNING &&
                            !buzzerIsPlaying()) {
-                    TonePatternType pat = selectPattern(event.source, newLevel);
+                    TonePatternType pat = selectPattern(event.source, newLevelLocal);
                     buzzerPlayPattern(pat);
+                    xSemaphoreTake(alertMutex, portMAX_DELAY);
                     _lastEscalationMs = millis();
-                } else if (millis() - _lastEscalationMs > REMINDER_INTERVAL &&
-                           !buzzerIsPlaying()) {
-                    if (newLevel >= THREAT_WARNING) {
-                        buzzerPlayPattern(TONE_RF_ADVISORY);  // soft reminder
-                    }
-                    _lastEscalationMs = millis();
-                }
-
-            } else if (newLevel < _lastThreat) {
-                // ── DE-ESCALATION ──
-                if (newLevel == THREAT_CLEAR) {
-                    if (!covert) buzzerPlayPattern(TONE_ALL_CLEAR);
-                    _isAcknowledged = false;
-
-                    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                        Serial.printf("[ALERT] De-escalation: %s -> CLEAR — buzzer: ALL_CLEAR\n",
-                                      threatStr(_lastThreat));
-                        xSemaphoreGive(serialMutex);
+                    xSemaphoreGive(alertMutex);
+                } else {
+                    xSemaphoreTake(alertMutex, portMAX_DELAY);
+                    bool timeToRemind =
+                        (millis() - _lastEscalationMs) > REMINDER_INTERVAL;
+                    if (timeToRemind) _lastEscalationMs = millis();
+                    xSemaphoreGive(alertMutex);
+                    if (timeToRemind && !buzzerIsPlaying() &&
+                        newLevelLocal >= THREAT_WARNING) {
+                        buzzerPlayPattern(TONE_RF_ADVISORY);
                     }
                 }
-                _lastThreat = newLevel;
+            } else if (deescalatedToClear) {
+                if (!covert) buzzerPlayPattern(TONE_ALL_CLEAR);
+                SERIAL_SAFE(Serial.printf("[ALERT] De-escalation: %s -> CLEAR — buzzer: ALL_CLEAR\n",
+                                          threatStr(prevThreat)));
             }
+        }
+
+        // Issue 8: log accumulated queue drops once per 10s if any.
+        uint32_t now_ms = millis();
+        if (now_ms - lastDropLogMs >= DROP_LOG_INTERVAL_MS) {
+            uint32_t drops = alertQueueDrops;
+            if (drops > 0) {
+                alertQueueDrops = 0;
+                SERIAL_SAFE(Serial.printf("[ALERT] Queue drops in last 10s: %u\n",
+                                          (unsigned)drops));
+            }
+            lastDropLogMs = now_ms;
         }
 
         // Update buzzer state machine (non-blocking)
         buzzerUpdate();
 
-        // LED tracks system threat level (from detection engine), not individual events
-        updateLED(systemThreat, _isAcknowledged);
+        // LED tracks system threat level (from detection engine), not
+        // individual events. Use the snap captured at the top of this
+        // iteration so we don't contend on alertMutex here.
+        updateLED(systemThreat, snapAck);
+
+        // Yield before the next drain pass.
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

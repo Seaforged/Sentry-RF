@@ -4,7 +4,8 @@
 #include "cad_scanner.h"
 #include "rf_scanner.h"
 #include "sentry_config.h"
-#include "data_logger.h"   // Phase L: emitZmqJson on threat transitions
+#include "data_logger.h"       // Phase L: emitZmqJson on threat transitions
+#include "alert_handler.h"     // Issue 8: alertQueueDropInc()
 #include <Arduino.h>
 #include <math.h>
 #include <string.h>
@@ -301,15 +302,15 @@ static DetectionCandidate* findCandidateForBandFreq(DetectionCandidate* pool, ui
             return &c;
         }
         // (b) falls within the expanded seen-frequency envelope
-        if (freq >= (c.minFreqSeen - 1.0f) && freq <= (c.maxFreqSeen + 1.0f)) {
+        if (freq >= (c.minFreqSeen - CAND_ASSOC_SUB_MHZ) &&
+            freq <= (c.maxFreqSeen + CAND_ASSOC_SUB_MHZ)) {
             return &c;
         }
-        // (c) candidate has live FHSS evidence → accept by regional band alone
-        if (evidenceLive(c.fhssSub, nowMs)) {
-            bool regionMatch = (freq >= 902.0f && freq <= 928.0f) ||  // US sub-GHz
-                               (freq >= 860.0f && freq <= 870.0f);    // EU sub-GHz
-            if (regionMatch) return &c;
-        }
+        // Issue 9: Region-wide association removed — fuses unrelated emitters
+        // in dense ISM environments. Envelope-based association is sufficient
+        // as the drone hops; each new hop expands minFreqSeen/maxFreqSeen so
+        // legitimate FHSS grows the envelope organically while unrelated
+        // gateways elsewhere in the band don't get merged in.
     }
     return nullptr;
 }
@@ -801,7 +802,9 @@ static void emitEvent(const TrackedSignal& sig, uint8_t severity) {
                  "Unknown signal %.1f MHz", sig.frequency);
     }
 
-    xQueueSend(detectionQueue, &event, 0);
+    if (xQueueSend(detectionQueue, &event, pdMS_TO_TICKS(5)) != pdTRUE) {
+        alertQueueDropInc();
+    }
 }
 
 static void emitProtoEvent(const ProtoTracker& pt, uint8_t severity) {
@@ -813,7 +816,9 @@ static void emitProtoEvent(const ProtoTracker& pt, uint8_t severity) {
     event.timestamp = millis();
     snprintf(event.description, sizeof(event.description),
              "%s (FHSS protocol)", pt.protocol->name);
-    xQueueSend(detectionQueue, &event, 0);
+    if (xQueueSend(detectionQueue, &event, pdMS_TO_TICKS(5)) != pdTRUE) {
+        alertQueueDropInc();
+    }
 }
 
 static void emitCadEvent(float freq, uint8_t sf, uint8_t severity) {
@@ -828,7 +833,9 @@ static void emitCadEvent(float freq, uint8_t sf, uint8_t severity) {
     event.timestamp = millis();
     snprintf(event.description, sizeof(event.description),
              "CAD LoRa SF%d/BW500", sf);
-    xQueueSend(detectionQueue, &event, 0);
+    if (xQueueSend(detectionQueue, &event, pdMS_TO_TICKS(5)) != pdTRUE) {
+        alertQueueDropInc();
+    }
 }
 
 static void emitFskEvent(float freq, uint8_t severity) {
@@ -841,7 +848,9 @@ static void emitFskEvent(float freq, uint8_t severity) {
     event.timestamp = millis();
     snprintf(event.description, sizeof(event.description),
              "FSK 85k1 preamble");
-    xQueueSend(detectionQueue, &event, 0);
+    if (xQueueSend(detectionQueue, &event, pdMS_TO_TICKS(5)) != pdTRUE) {
+        alertQueueDropInc();
+    }
 }
 
 static int lastScore = 0;  // exposed for serial output
@@ -889,7 +898,9 @@ static void emitCandidateThreatEvent(ThreatLevel level, float anchorFreq) {
         snprintf(event.description, sizeof(event.description),
                  "Candidate RF track");
     }
-    xQueueSend(detectionQueue, &event, 0);
+    if (xQueueSend(detectionQueue, &event, pdMS_TO_TICKS(5)) != pdTRUE) {
+        alertQueueDropInc();
+    }
 }
 
 // Phase G: the legacy assessThreat() scorer was removed here. It had been
@@ -1059,6 +1070,48 @@ void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan
             markProtoSeen(peaks24[p].match.protocol, peaks24[p].frequency);
         }
         cleanupProtoTracking();
+
+        // Issue 6: OFDM plateau detector. Runs in parallel with the
+        // peak-finder, does NOT share its WiFi-channel reject. Scans the
+        // full 100-bin 2.4 GHz sweep for the longest run of bins at-or-
+        // above threshold; when the run meets/exceeds OFDM_PLATEAU_MIN_BINS
+        // for OFDM_PLATEAU_PERSIST_CYCLES consecutive sweeps, attaches
+        // bwWide evidence to the best active sub-GHz candidate (same
+        // confirmer-only association rule as proto24/cad24 — never seeds
+        // a new candidate).
+        static int plateauConsecutive = 0;
+        float plateauThreshold = nf24 + OFDM_PLATEAU_THRESHOLD_DB;
+        int plateauLen = findLongestElevatedRun(scan24->rssi,
+                                                SCAN_24_BIN_COUNT,
+                                                plateauThreshold);
+        if (plateauLen >= OFDM_PLATEAU_MIN_BINS) {
+            plateauConsecutive++;
+        } else {
+            plateauConsecutive = 0;
+        }
+        if (plateauConsecutive == OFDM_PLATEAU_PERSIST_CYCLES) {
+            // Only log on the edge — don't spam every sweep while the
+            // plateau persists. Attach evidence each cycle though, so TTL
+            // refreshes naturally.
+            SERIAL_SAFE(Serial.printf("[OFDM-PLATEAU] 2.4 GHz run=%d bins @ NF+%.0fdB (persist=%d sweeps)\n",
+                                      plateauLen,
+                                      (double)OFDM_PLATEAU_THRESHOLD_DB,
+                                      OFDM_PLATEAU_PERSIST_CYCLES));
+        }
+        if (plateauConsecutive >= OFDM_PLATEAU_PERSIST_CYCLES) {
+            // Attach bwWide to the best active sub-GHz candidate — same
+            // "confirmer, never seeds" rule as the 2.4 GHz evidence path
+            // at extractPeaks24. No sub-GHz candidate → no attachment.
+            uint32_t nowMs2 = (uint32_t)millis();
+            for (uint8_t c = 0; c < MAX_CANDIDATES; c++) {
+                DetectionCandidate& cand = candidatePool[c];
+                if (!cand.active || !(cand.bandMask & 0x01)) continue;
+                refreshEvidence(cand.bwWide,
+                                (uint8_t)WEIGHT_CONFIRM_BW_WIDE,
+                                TTL_BW_WIDE_MS, nowMs2, /*ready=*/true);
+                cand.bandMask |= 0x02;
+            }
+        }
     }
 
     // ── Phase D.2 + Phase E: attach sweep evidence to best active sub-GHz
@@ -1362,6 +1415,14 @@ static ThreatDecision evaluateCandidateEngine(const GpsData& gps,
     //  - rid: always ready (independent hardware)
     //  - gnss: ready only when GPS has a valid 3D fix AND an RF detection was
     //    active within GNSS_RF_CORRELATION_WINDOW_MS (Phase 3.3).
+    //
+    // Issue 7: this is the "gnssBoost" path — GNSS still attaches to the
+    // candidate confirm score when RF is correlated, but the standalone
+    // alert path now lives in gnss_integrity.cpp (emits DET_SOURCE_GNSS
+    // DetectionEvent directly to the alert queue on rising transitions).
+    // A GNSS anomaly with NO correlated RF will still sound the buzzer
+    // via the alert handler; the gate below controls ONLY the candidate-
+    // engine score boost, not alerting.
     //
     // GNSS anomaly only contributes to candidate confirm score when RF
     // detection has been active within the last 30s. This prevents a

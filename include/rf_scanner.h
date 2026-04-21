@@ -86,4 +86,11 @@ float getAdaptiveNoiseFloor();
 int countElevatedAdjacentBins(const float* rssi, int numBins,
                               int peakIdx, float threshold);
 
+// Issue 6: find the longest run of consecutive bins at-or-above threshold
+// anywhere in the array. Unlike countElevatedAdjacentBins(), this does not
+// require a peak-finder — it will find OFDM plateaus whose peaks sit inside
+// a WiFi channel and therefore never become DetectedPeaks. O(n), zero alloc.
+// Returns 0 if no run found.
+int findLongestElevatedRun(const float* rssi, int numBins, float threshold);
+
 #endif // RF_SCANNER_H
