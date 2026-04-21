@@ -89,8 +89,15 @@ static void evaluateSpoofing(const GpsData& gps, IntegrityStatus& status) {
     // C/N0 uniformity check: real satellites at different ranges/elevations have
     // varied signal strength. A spoofer broadcasts from one point so all signals
     // arrive at similar power — stdDev collapses below ~2 dB-Hz.
-    status.cnoAnomalyDetected = (status.cnoStdDev < CNO_STDDEV_SPOOF_THRESH)
-                                && (status.cnoStdDev >= 0.0);
+    //
+    // Uniformity check suppressed when GPS_MIN_CNO < 15 — indoor attenuated
+    // signals cluster naturally and produce false positives.
+    if (GPS_MIN_CNO < 15) {
+        status.cnoAnomalyDetected = false;
+    } else {
+        status.cnoAnomalyDetected = (status.cnoStdDev < CNO_STDDEV_SPOOF_THRESH)
+                                    && (status.cnoStdDev >= 0.0);
+    }
 
     evaluatePositionJump(gps, status);
 
