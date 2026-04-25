@@ -50,6 +50,20 @@ int     detectionEngineGetCandidateCount();
 // Timestamp of the most recent detection event that scored ADVISORY or higher.
 uint32_t getLastDetectionMs();
 
+// Sprint 1 (v3 Tier 1) — warmup graduation fix per brief §Sprint 1 / CC §3.2.2.
+// Returns true if freqMHz falls within any active candidate's seen-frequency
+// envelope (minFreqSeen / maxFreqSeen) extended by ±toleranceMHz. Used by
+// cad_scanner::completeWarmupAndGraduatePending() to suppress graduation of
+// pending ambient entries that overlap a live drone candidate's FHSS hop
+// footprint — preventing the "drone is not hidden, it is learned" failure
+// mode that caused A01/A02/B02 to stay CLEAR in the April 24 characterization.
+//
+// Envelope-based (not anchor-only): a fast-FHSS drone hops across the full
+// channel plan but the candidate's anchorFreq tracks the most recent
+// observation, so anchor ± 1 MHz catches only 2-3 of 40 ELRS channels per
+// moment. The minFreqSeen/maxFreqSeen envelope is the actual hop footprint.
+bool detectionEngineHasActiveCandidateNearFreq(float freqMHz, float toleranceMHz);
+
 // ── Candidate engine data structures (introduced Phase C, cutover Phase D) ─
 // As of Phase G, the candidate engine is the sole threat decider. The legacy
 // assessThreat() comparison path and its [CAND-DELTA] regression-alarm logging

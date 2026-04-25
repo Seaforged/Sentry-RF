@@ -940,6 +940,30 @@ int     detectionEngineGetCandidateCount() { return lastCandidateCount; }
 
 uint32_t getLastDetectionMs() { return lastDetectionMs; }
 
+// Sprint 1 (v3 Tier 1) — see detection_engine.h. Envelope-based match with a
+// hard span cap to reject candidates whose envelope has stretched across
+// ambient. DetectionCandidate has no per-evidence frequency list, so we use
+// minFreqSeen/maxFreqSeen — but only when the seen-range is narrow enough to
+// represent a coherent drone signal (≤5 MHz, per ND refinement after the
+// envelope-only run zeroed out cross-band attach). A candidate that has
+// already grown a wider envelope is either (a) far enough along that the
+// FHSS-spread tracker is firing on its own, or (b) polluted by ambient and
+// shouldn't be the basis for suppressing graduation.
+constexpr float SPRINT1_MAX_ENVELOPE_SPAN_MHZ = 5.0f;
+bool detectionEngineHasActiveCandidateNearFreq(float freqMHz, float toleranceMHz) {
+    for (uint8_t i = 0; i < MAX_CANDIDATES; i++) {
+        const DetectionCandidate& c = candidatePool[i];
+        if (!c.active) continue;
+        const float span = c.maxFreqSeen - c.minFreqSeen;
+        if (span > SPRINT1_MAX_ENVELOPE_SPAN_MHZ) continue;
+        if (freqMHz >= c.minFreqSeen - toleranceMHz &&
+            freqMHz <= c.maxFreqSeen + toleranceMHz) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // ── Refactor 3: split ingest/assess ────────────────────────────────────────
 // Duplicate sweep rejection: if the same ScanResult is fed to
 // detectionEngineIngestSweep() twice in a row (same seq), reject the second

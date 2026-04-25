@@ -8,6 +8,12 @@
 // Access the Module object for low-level SPI commands (defined in main.cpp)
 extern Module radioMod;
 
+// Sprint 1 (v3 Tier 1) — forward decl from detection_engine.h to avoid the
+// include cycle that pulling the full header here would create. Used in
+// completeWarmupAndGraduatePending() to suppress drone anchors from being
+// graduated as ambient.
+extern bool detectionEngineHasActiveCandidateNearFreq(float freqMHz, float toleranceMHz);
+
 // ── Per-SF CAD detection parameters (Semtech AN1200.48) ────────────────────
 // Biased toward higher detection probability — persistence filter handles
 // false hits. Index by (SF - 6).
@@ -229,11 +235,33 @@ void markPendingAmbientCorroboration(float freqMHz) {
 static void completeWarmupAndGraduatePending(int* graduatedOut, int* discardedOut) {
     int graduated = 0;
     int discarded = 0;
+    int suppressed = 0;
 
     lockPendingAmbientState();
     warmupComplete = true;
     for (int i = 0; i < MAX_AMBIENT_TAPS; i++) {
         if (!pendingAmbientTaps[i].active) continue;
+
+        // Sprint 1 (v3 Tier 1) — CC §3.2.2 / brief §Sprint 1.
+        // If a pending entry overlaps an active candidate's anchor (±1 MHz),
+        // it's almost certainly a drone hopping channel that the candidate
+        // engine has already locked onto. Mark it corroborated rather than
+        // graduating it to ambient — otherwise we'd silently learn the drone
+        // as infrastructure and `isAmbientFrequency()` would gate every
+        // future CAD hit on those channels (the A01/A02/B02 miss class).
+        // Log unconditionally on overlap so the new check is observable
+        // even when the older FHSS-spread corroboration already covered
+        // the entry — the brief specifies the message must appear at
+        // least once when JJ is active during warmup.
+        if (detectionEngineHasActiveCandidateNearFreq(pendingAmbientTaps[i].freqMHz,
+                                                     CAND_ASSOC_SUB_MHZ)) {
+            pendingAmbientTaps[i].hasCorroboration = true;
+            SERIAL_SAFE(Serial.printf(
+                "[WARMUP] suppressed graduation for %.1fMHz - matches active candidate\n",
+                pendingAmbientTaps[i].freqMHz));
+            suppressed++;
+        }
+
         if (pendingAmbientTaps[i].hasCorroboration) {
             discarded++;
         } else {
@@ -245,6 +273,11 @@ static void completeWarmupAndGraduatePending(int* graduatedOut, int* discardedOu
     }
     pendingAmbientCount = 0;
     unlockPendingAmbientState();
+
+    if (suppressed > 0) {
+        SERIAL_SAFE(Serial.printf(
+            "[WARMUP] candidate-overlap suppressed %d pending entries\n", suppressed));
+    }
 
     if (graduatedOut != nullptr) *graduatedOut = graduated;
     if (discardedOut != nullptr) *discardedOut = discarded;
