@@ -64,6 +64,17 @@ uint32_t getLastDetectionMs();
 // moment. The minFreqSeen/maxFreqSeen envelope is the actual hop footprint.
 bool detectionEngineHasActiveCandidateNearFreq(float freqMHz, float toleranceMHz);
 
+// Sprint 2 (v3 Tier 1) — auto-learn suppression per brief §Sprint 2 / CC
+// §3.4.3 reuses detectionEngineHasActiveCandidateNearFreq() above as a
+// per-frequency gate inside the post-warmup auto-learn loop (no separate
+// accessor needed). The initial design used a global "any candidate above
+// ADVISORY" gate, but bench validation showed it let above-ADVISORY noise
+// candidates lock all ambient learning, preventing real drone signals
+// from establishing their own candidate — A01 regressed ADVISORY -> CLEAR.
+// Per-frequency is surgical: only blocks auto-learn for taps that overlap
+// a real candidate's evidence envelope, leaving other bench infrastructure
+// free to be learned as ambient normally.
+
 // ── Candidate engine data structures (introduced Phase C, cutover Phase D) ─
 // As of Phase G, the candidate engine is the sole threat decider. The legacy
 // assessThreat() comparison path and its [CAND-DELTA] regression-alarm logging

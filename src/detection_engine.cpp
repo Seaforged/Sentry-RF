@@ -964,6 +964,11 @@ bool detectionEngineHasActiveCandidateNearFreq(float freqMHz, float toleranceMHz
     return false;
 }
 
+// Sprint 2 (v3 Tier 1) — see detection_engine.h. Sprint 2 reuses the
+// per-frequency `detectionEngineHasActiveCandidateNearFreq()` accessor above;
+// no Sprint 2 specific implementation needed. (An earlier draft added an
+// `aboveAdvisory()` global gate but it broke A01 detection on noisy benches.)
+
 // ── Refactor 3: split ingest/assess ────────────────────────────────────────
 // Duplicate sweep rejection: if the same ScanResult is fed to
 // detectionEngineIngestSweep() twice in a row (same seq), reject the second

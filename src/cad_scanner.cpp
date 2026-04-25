@@ -14,6 +14,9 @@ extern Module radioMod;
 // graduated as ambient.
 extern bool detectionEngineHasActiveCandidateNearFreq(float freqMHz, float toleranceMHz);
 
+// Sprint 2 (v3 Tier 1) reuses the Sprint 1 fwd-decl above as a per-frequency
+// gate inside the post-warmup auto-learn loop — see detection_engine.h.
+
 // ── Per-SF CAD detection parameters (Semtech AN1200.48) ────────────────────
 // Biased toward higher detection probability — persistence filter handles
 // false hits. Index by (SF - 6).
@@ -1443,8 +1446,20 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
     // path re-captured any freq seen during warmup as ambient even if the
     // probation table had correctly discarded it. Post-warmup we only
     // auto-learn NEW confirmed taps that sit steady past AMBIENT_AUTOLEARN_MS.
+    //
+    // Sprint 2 (v3 Tier 1) — CC §3.4.3 / brief §Sprint 2: post-warmup
+    // companion to Sprint 1. Skip auto-learn for any tap whose frequency
+    // overlaps an active candidate's evidence envelope (per-frequency gate,
+    // reusing Sprint 1's existing accessor with its 5 MHz span cap). The
+    // initial design used a global "any candidate above ADVISORY" gate but
+    // bench validation showed it let above-ADVISORY noise candidates lock
+    // all ambient learning and prevented real drones from establishing
+    // their own candidate (A01 regressed ADVISORY -> CLEAR). Per-frequency
+    // is surgical: drone freqs stay protected while bench infrastructure
+    // can still get learned as ambient.
     if (warmupComplete) {
         unsigned long now = millis();
+        static uint32_t lastAutolearnDeferLogMs = 0;
         BandTracker* trackers[] = { &subGHzTracker, &band24Tracker };
         for (BandTracker* tp : trackers) {
             BandTracker& tk = *tp;
@@ -1454,6 +1469,16 @@ CadFskResult cadFskScan(LR1121_RSSI& radio, uint32_t cycleNum, const ScanResult*
                     tk.taps[i].consecutiveHits >= TAP_CONFIRM_HITS &&
                     !isAmbientCadSource(tk.taps[i].frequency, tk.taps[i].sf)) {
                     if ((now - tk.taps[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
+                        if (detectionEngineHasActiveCandidateNearFreq(
+                                tk.taps[i].frequency, CAND_ASSOC_SUB_MHZ)) {
+                            if (now - lastAutolearnDeferLogMs > 5000) {
+                                SERIAL_SAFE(Serial.printf(
+                                    "[AUTOLEARN] deferred — %.1fMHz overlaps active candidate\n",
+                                    tk.taps[i].frequency));
+                                lastAutolearnDeferLogMs = now;
+                            }
+                            continue;
+                        }
                         recordAmbientTap(tk.taps[i].frequency, tk.taps[i].sf, false);
                     }
                 }
@@ -1817,14 +1842,28 @@ CadFskResult cadFskScan(SX1262& radio, uint32_t cycleNum, const ScanResult* rssi
     // firstSeenMs < AMBIENT_WARMUP_MS retag path deleted — it defeated
     // the probation table by re-learning any freq seen during warmup even
     // if the table correctly discarded it.
+    //
+    // Sprint 2 (v3 Tier 1) — CC §3.4.3 / brief §Sprint 2: per-frequency
+    // gate on auto-learn, see LR1121 path above for full rationale.
     if (warmupComplete) {
         unsigned long now = millis();
+        static uint32_t lastAutolearnDeferLogMs = 0;
         for (int i = 0; i < MAX_TAPS; i++) {
             if (subGHzTracker.taps[i].active &&
                 !subGHzTracker.taps[i].isFsk &&
                 subGHzTracker.taps[i].consecutiveHits >= TAP_CONFIRM_HITS &&
                 !isAmbientCadSource(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf)) {
                 if ((now - subGHzTracker.taps[i].firstSeenMs) > AMBIENT_AUTOLEARN_MS) {
+                    if (detectionEngineHasActiveCandidateNearFreq(
+                            subGHzTracker.taps[i].frequency, CAND_ASSOC_SUB_MHZ)) {
+                        if (now - lastAutolearnDeferLogMs > 5000) {
+                            SERIAL_SAFE(Serial.printf(
+                                "[AUTOLEARN] deferred — %.1fMHz overlaps active candidate\n",
+                                subGHzTracker.taps[i].frequency));
+                            lastAutolearnDeferLogMs = now;
+                        }
+                        continue;
+                    }
                     recordAmbientTap(subGHzTracker.taps[i].frequency, subGHzTracker.taps[i].sf, false);
                 }
             }
