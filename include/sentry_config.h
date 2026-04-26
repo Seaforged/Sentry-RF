@@ -245,7 +245,13 @@ static const unsigned long REMINDER_INTERVAL = 30000;  // 30 seconds
 // --- Scoring policy thresholds ---
 #define POLICY_ADVISORY_FAST        15
 #define POLICY_WARNING_FAST         40
-#define POLICY_WARNING_CONFIRM      5
+// Sprint 5b (v3 Tier 1) — raised from 5 to 15 per brief §Sprint 5 / Codex T1.
+// Multiplicative scoring (persistence multiplier ≤ 1.0) means infrastructure-
+// like single-channel candidates have their confirm score scaled by 0.3×;
+// the higher confirm threshold combined with the multiplier should keep
+// J01-class infra patterns below ADVISORY while real drones with cross-band
+// attach (A04: confirm=25 raw × 1.0 = 25, well above 15) escalate normally.
+#define POLICY_WARNING_CONFIRM      15
 #define POLICY_CRITICAL_FAST        40
 #define POLICY_CRITICAL_CONFIRM     30
 #define POLICY_RID_ONLY_ADVISORY    30      // RID confirm score for ADVISORY without RF candidate

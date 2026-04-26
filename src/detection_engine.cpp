@@ -277,13 +277,47 @@ static bool candidateNeedsInfraProbation(const DetectionCandidate& c, uint32_t n
     return candidateFreqSpanMhz(c) <= CAND_INFRA_NARROW_SPAN_MHZ;
 }
 
+// Sprint 5b (v3 Tier 1) — persistence factor per spec §2.4 simplified using
+// the candidate-local diversity slot count and age. Returns:
+//   1.5  drone pattern   (envelope spans >= 4 association bins)
+//   0.3  infrastructure  (single-bin candidate aged past probation window)
+//   1.0  mixed           (everything else)
+// Per Codex's formulation in 14.md PART B, this is applied as
+// `multiplier = min(1.0, factor)`, so 1.5 caps to 1.0 (drone pattern doesn't
+// boost confirm — it just doesn't suppress). Computed BEFORE the cross-band
+// attach gate so the gate can use it.
+constexpr float SPRINT5_PERSISTENCE_DRONE = 1.5f;
+constexpr float SPRINT5_PERSISTENCE_MIXED = 1.0f;
+constexpr float SPRINT5_PERSISTENCE_INFRA = 0.3f;
+constexpr uint8_t SPRINT5_DRONE_SPAN_SLOTS = 4;
+static float computePersistenceFactor(const DetectionCandidate& c, uint32_t nowMs) {
+    const uint8_t spanSlots = candidateLocalDiversityCount(c);
+    const uint32_t ageMs = (nowMs >= c.firstSeenMs) ? (nowMs - c.firstSeenMs) : 0;
+    if (spanSlots >= SPRINT5_DRONE_SPAN_SLOTS) return SPRINT5_PERSISTENCE_DRONE;
+    if (spanSlots == 1 && ageMs >= CAND_INFRA_PROBATION_MS) return SPRINT5_PERSISTENCE_INFRA;
+    return SPRINT5_PERSISTENCE_MIXED;
+}
+static float persistenceMultiplier(const DetectionCandidate& c, uint32_t nowMs) {
+    const float p = computePersistenceFactor(c, nowMs);
+    return (p < 1.0f) ? p : 1.0f;
+}
+
 static bool candidateCanAccept24Confirmer(const DetectionCandidate& c, uint32_t nowMs) {
-    // sweepSub intentionally excluded here: a post-warmup sweep peak alone is
-    // too easy to earn on persistent bench infrastructure. Cross-band attach
-    // requires stronger corroboration.
-    return candidateHasValidatedClusterEvidence(c, nowMs) ||
-           evidenceLive(c.protoSub, nowMs) ||
-           evidenceLive(c.bandEnergy, nowMs);
+    // Sprint 5b (v3 Tier 1) — Rule C cross-band attach gate (Sprint 5a's
+    // non-ambient provenance bit + persistence-aware infrastructure block).
+    // See docs/CROSS_BAND_ATTACH_ANALYSIS_CC.md and 14.md PART A.
+    //
+    // Reject infrastructure-like candidates (persistence factor < 0.5).
+    if (computePersistenceFactor(c, nowMs) < 0.5f) return false;
+    // Require live confirmed sub-GHz modulation evidence on a non-ambient
+    // anchor (cadConfirmed/fskConfirmed) OR live protoSub. cadPending,
+    // sweepSub, bandEnergy alone no longer qualify; this rejects the
+    // bench-noise wrong-band attach path (I01 evidence in §3.2 of the
+    // analysis doc).
+    const bool cadOK   = evidenceLive(c.cadConfirmed, nowMs) && c.cadConfirmed.nonAmbient;
+    const bool fskOK   = evidenceLive(c.fskConfirmed, nowMs) && c.fskConfirmed.nonAmbient;
+    const bool protoOK = evidenceLive(c.protoSub, nowMs);
+    return cadOK || fskOK || protoOK;
 }
 
 static void ageOutCandidates(DetectionCandidate* pool, uint8_t count, uint32_t nowMs) {
@@ -375,15 +409,32 @@ static uint8_t computeFastScore(const DetectionCandidate& c, uint32_t nowMs) {
 }
 
 static uint8_t computeConfirmScore(const DetectionCandidate& c, uint32_t nowMs) {
+    // Sprint 5b (v3 Tier 1) — bwWide is context-only unless paired with
+    // live RID or GNSS. Per 14.md PART A: "bwWide alone qualifies only if
+    // also paired with live RID or GNSS evidence; otherwise context-only."
+    const bool ridOrGnssLive = evidenceLive(c.rid, nowMs) ||
+                               evidenceLive(c.gnss, nowMs);
+    const uint16_t bwWideContrib = ridOrGnssLive
+        ? (uint16_t)evidenceScore(c.bwWide, nowMs)
+        : 0;
+
     uint16_t total = (uint16_t)evidenceScore(c.sweepSub,   nowMs) +
                      (uint16_t)evidenceScore(c.protoSub,   nowMs) +
                      (uint16_t)evidenceScore(c.bandEnergy, nowMs) +  // Phase E
                      (uint16_t)evidenceScore(c.cad24,      nowMs) +
                      (uint16_t)evidenceScore(c.proto24,    nowMs) +
-                     (uint16_t)evidenceScore(c.bwWide,     nowMs) +  // Phase I
+                     bwWideContrib +                                  // Phase I + 5b
                      (uint16_t)evidenceScore(c.rid,        nowMs) +
                      (uint16_t)evidenceScore(c.gnss,       nowMs);
-    return (total > 255) ? (uint8_t)255 : (uint8_t)total;
+
+    // Sprint 5b multiplicative scoring per spec §2.4 / 14.md PART B.
+    // confirm_final = confirm_raw × min(1.0, persistence_factor).
+    // Drone-pattern (1.5) caps at 1.0 — never inflates raw. Infrastructure
+    // (0.3) scales the score down, dropping J01-class single-channel
+    // candidates well below the WARNING confirm threshold.
+    const float mult = persistenceMultiplier(c, nowMs);
+    const uint16_t scaled = (uint16_t)((float)total * mult + 0.5f);
+    return (scaled > 255) ? (uint8_t)255 : (uint8_t)scaled;
 }
 
 static DetectionCandidate* findCandidateForSweep(DetectionCandidate* pool, uint8_t count,
@@ -1164,10 +1215,33 @@ void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan
                                      (uint16_t)bestFast >= (uint16_t)secondFast + 15);
             if (canAttachPlateau && bestSubGHz &&
                 candidateCanAccept24Confirmer(*bestSubGHz, nowMs2)) {
+#if ENABLE_ATTACH_TRACE
+                const uint8_t bandMaskBefore = bestSubGHz->bandMask;
+                const uint8_t fastBefore     = computeFastScore(*bestSubGHz, nowMs2);
+                const uint8_t confirmBefore  = computeConfirmScore(*bestSubGHz, nowMs2);
+#endif
                 refreshEvidence(bestSubGHz->bwWide,
                                 (uint8_t)WEIGHT_CONFIRM_BW_WIDE,
                                 TTL_BW_WIDE_MS, nowMs2, /*ready=*/true);
                 bestSubGHz->bandMask |= 0x02;
+#if ENABLE_ATTACH_TRACE
+                SERIAL_SAFE(Serial.printf(
+                    "[ATTACH] anchor=%.1fMHz bandMaskBefore=0x%02x fast=%u confirmBefore=%u "
+                    "cadConfirmed=%u cadPending=%u fskConfirmed=%u protoSub=%u bandEnergy=%u "
+                    "persistenceFactor=%.2f nonAmbient=%d infraLike=%d "
+                    "e24kind=bwWide e24score=%u confirmAfter=%u\n",
+                    bestSubGHz->anchorFreq, bandMaskBefore, fastBefore, confirmBefore,
+                    evidenceScore(bestSubGHz->cadConfirmed, nowMs2),
+                    evidenceScore(bestSubGHz->cadPending,   nowMs2),
+                    evidenceScore(bestSubGHz->fskConfirmed, nowMs2),
+                    evidenceScore(bestSubGHz->protoSub,     nowMs2),
+                    evidenceScore(bestSubGHz->bandEnergy,   nowMs2),
+                    computePersistenceFactor(*bestSubGHz, nowMs2),
+                    bestSubGHz->cadConfirmed.nonAmbient ? 1 : 0,
+                    computePersistenceFactor(*bestSubGHz, nowMs2) < 0.5f ? 1 : 0,
+                    (unsigned)WEIGHT_CONFIRM_BW_WIDE,
+                    computeConfirmScore(*bestSubGHz, nowMs2)));
+#endif
             }
         }
     }
@@ -1254,12 +1328,35 @@ void detectionEngineIngestSweep(const ScanResult& scan, const ScanResult24* scan
                                      (uint16_t)bestFast >= (uint16_t)secondFast + 15);
             if (canAttachProto24 && bestSubGHz &&
                 candidateCanAccept24Confirmer(*bestSubGHz, nowMs)) {
+#if ENABLE_ATTACH_TRACE
+                const uint8_t bandMaskBefore = bestSubGHz->bandMask;
+                const uint8_t fastBefore     = computeFastScore(*bestSubGHz, nowMs);
+                const uint8_t confirmBefore  = computeConfirmScore(*bestSubGHz, nowMs);
+#endif
                 refreshEvidence(bestSubGHz->proto24,
                                 (uint8_t)WEIGHT_CONFIRM_PROTO,
                                 TTL_PROTO24_MS, nowMs, /*ready=*/true);
                 bestSubGHz->bandMask |= 0x02;
                 SERIAL_SAFE(Serial.printf("[CAND] 2.4GHz proto confirmed — attached to anchor=%.1fMHz\n",
                                           bestSubGHz->anchorFreq));
+#if ENABLE_ATTACH_TRACE
+                SERIAL_SAFE(Serial.printf(
+                    "[ATTACH] anchor=%.1fMHz bandMaskBefore=0x%02x fast=%u confirmBefore=%u "
+                    "cadConfirmed=%u cadPending=%u fskConfirmed=%u protoSub=%u bandEnergy=%u "
+                    "persistenceFactor=%.2f nonAmbient=%d infraLike=%d "
+                    "e24kind=proto24 e24score=%u confirmAfter=%u\n",
+                    bestSubGHz->anchorFreq, bandMaskBefore, fastBefore, confirmBefore,
+                    evidenceScore(bestSubGHz->cadConfirmed, nowMs),
+                    evidenceScore(bestSubGHz->cadPending,   nowMs),
+                    evidenceScore(bestSubGHz->fskConfirmed, nowMs),
+                    evidenceScore(bestSubGHz->protoSub,     nowMs),
+                    evidenceScore(bestSubGHz->bandEnergy,   nowMs),
+                    computePersistenceFactor(*bestSubGHz, nowMs),
+                    bestSubGHz->cadConfirmed.nonAmbient ? 1 : 0,
+                    computePersistenceFactor(*bestSubGHz, nowMs) < 0.5f ? 1 : 0,
+                    (unsigned)WEIGHT_CONFIRM_PROTO,
+                    computeConfirmScore(*bestSubGHz, nowMs)));
+#endif
             }
         }
     }
@@ -1448,11 +1545,33 @@ static ThreatDecision evaluateCandidateEngine(const GpsData& gps,
                 // 2.4 GHz CAD remains confirmer-only. In addition to the
                 // lone/dominant association guard above, require strong
                 // corroborated sub-GHz FHSS evidence before cross-band attach.
+#if ENABLE_ATTACH_TRACE
+                const uint8_t bandMaskBefore = bestSubGHz->bandMask;
+                const uint8_t fastBefore     = computeFastScore(*bestSubGHz, nowMs);
+                const uint8_t confirmBefore  = computeConfirmScore(*bestSubGHz, nowMs);
+#endif
                 refreshEvidence(bestSubGHz->cad24, 10, TTL_CAD24_MS, nowMs,
                                 /*ready=*/true);
                 bestSubGHz->bandMask |= 0x02;
                 SERIAL_SAFE(Serial.printf("[CAND] 2.4GHz confirmed — attached to anchor=%.1fMHz\n",
                                           bestSubGHz->anchorFreq));
+#if ENABLE_ATTACH_TRACE
+                SERIAL_SAFE(Serial.printf(
+                    "[ATTACH] anchor=%.1fMHz bandMaskBefore=0x%02x fast=%u confirmBefore=%u "
+                    "cadConfirmed=%u cadPending=%u fskConfirmed=%u protoSub=%u bandEnergy=%u "
+                    "persistenceFactor=%.2f nonAmbient=%d infraLike=%d "
+                    "e24kind=cad24 e24score=10 confirmAfter=%u\n",
+                    bestSubGHz->anchorFreq, bandMaskBefore, fastBefore, confirmBefore,
+                    evidenceScore(bestSubGHz->cadConfirmed, nowMs),
+                    evidenceScore(bestSubGHz->cadPending,   nowMs),
+                    evidenceScore(bestSubGHz->fskConfirmed, nowMs),
+                    evidenceScore(bestSubGHz->protoSub,     nowMs),
+                    evidenceScore(bestSubGHz->bandEnergy,   nowMs),
+                    computePersistenceFactor(*bestSubGHz, nowMs),
+                    bestSubGHz->cadConfirmed.nonAmbient ? 1 : 0,
+                    computePersistenceFactor(*bestSubGHz, nowMs) < 0.5f ? 1 : 0,
+                    computeConfirmScore(*bestSubGHz, nowMs)));
+#endif
             }
         }
     }
