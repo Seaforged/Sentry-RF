@@ -32,7 +32,7 @@
 | Development Board | Heltec WiFi LoRa 32 V3 | $18-22 | ESP32-S3 + SX1262 + OLED. Smaller, no SD card, no QWIIC. Uses CP2102 USB bridge |
 | Sub-GHz Antenna | Same as above | $5-8 | |
 
-The Heltec V3 is a compact alternative with the same detection capabilities. It lacks an SD card slot (uses SPIFFS for logging, rotates at 100KB), has no QWIIC connector for compass, and requires a TCXO init step (handled automatically by the firmware).
+Heltec V3 supports sub-GHz CAD scanning and FHSS detection but lacks 2.4 GHz, GPS hardware, and the WiFi skip-list learning feature (which depends on a 3D GPS fix). Proximity-CRITICAL escalation is unavailable on this board. The Heltec V3 also has no SD card slot (logs to SPIFFS at `/log.csv`, rotates at 100KB), no QWIIC connector for an external compass, and requires a 1.8V TCXO init step (handled automatically by the firmware).
 
 ### Future Upgrade: LR1121 Dual-Band
 
@@ -56,7 +56,15 @@ VCC -----------------> 3.3V
 GND -----------------> GND
 ```
 
-### GPS Module (Heltec V3)
+### GPS Module (Heltec V3) — advanced / unsupported configuration
+
+The Heltec V3 board does not ship with a GPS module. The firmware
+defines GPS UART pins for this board (`PIN_GPS_RX = 46`,
+`PIN_GPS_TX = 45` in `include/board_config.h`), so an external
+u-blox M10 GPS module can be wired in if you want proximity-aware
+features on Heltec hardware. This is an advanced configuration —
+not validated as part of standard testing — and you're on your
+own for the physical mounting.
 
 ```
 GPS Module          Heltec V3
@@ -66,6 +74,11 @@ RX  <----------------- GPIO 45 (UART1 TX)
 VCC -----------------> 3.3V
 GND -----------------> GND
 ```
+
+If you don't add an external GPS module, GPS-aware features
+(proximity-CRITICAL escalation, WiFi skip-list location
+invalidation) fail closed on Heltec V3. All other detection paths
+continue to function.
 
 ### Buzzer
 
@@ -130,66 +143,87 @@ PlatformIO automatically downloads all dependencies (RadioLib, SparkFun u-blox G
    pio device monitor -b 115200
    ```
 
-### Expected Boot Output (v1.5.3)
+### Expected Boot Output (v2.0.0)
 
 ```
-========== SENTRY-RF v1.5.3 ==========
-[BOOT] Boot #1
+========== SENTRY-RF v2.0.0 ==========
+[BOOT] Boot #N
+[ENV-MODE] loaded from NVS: SUBURBAN (tap=10.0 skip=180000ms)
 ========================
- SENTRY-RF v1.5.3
- Build: Apr  6 2026
- Board: LilyGo T3S3
+ SENTRY-RF v2.0.0
+ Build: <date>
+ Board: <LilyGo T3S3 | T3S3 LR1121 | Heltec V3>
  Mode:  FreeRTOS dual-core
 ========================
 [OLED] OK
-[SCAN] FSK mode ready, 350 bins, 860.0-930.0 MHz
+[SCAN] GFSK mode ready (LR1121), 350 bins, 860.0-930.0 MHz
+[SELFTEST] Radio: OK (api_ok=1 range=N.NdB)
+[SELFTEST] Antenna: OK
+[SELFTEST] GPS: Acquiring... (async)
 [GPS] Connected at 38400 baud — configuring
 [WIFI] Promiscuous scanner active — channel hopping
+[BLE] Scanner init — window=50ms interval=500ms (passive)
 [COMPASS] Not detected — continuing without compass
-[INIT] FreeRTOS tasks launched — LoRa:Core1, GPS+WiFi:Core0
+[INIT] FreeRTOS tasks launched
 ...
-[WARMUP] Complete after 20 cycles (51s). 12 ambient taps recorded:
-  - 923.1 MHz / SF9 (first seen cycle 2)
-  - 917.6 MHz / SF6 (first seen cycle 3)
-  ...
-[CAD] cycle=21 conf=0 taps=1 div=1 persDiv=0 vel=0 sustainedCycles=0 score=5
+[WARMUP] progressive ambient tag: 902.3MHz
+[WARMUP] progressive ambient tag: 906.5MHz
+...
+[CAD] cycle=N subConf=N sub24Conf=N fastConf=N taps=N div=N persDiv=N vel=N sustainedCycles=N score=N fast=N confirm=N anchor=<freq>MHz
 ```
+
+The exact `Board:` line depends on which build target you flashed.
+See [`FLASHING.md`](FLASHING.md#important-match-the-firmware-target-to-your-board-variant)
+for the target-vs-board matching rules.
 
 ### First Boot Checklist
 
 - [ ] SENTRY-RF splash logo appears on OLED (~8-10s boot with GPS)
 - [ ] Dashboard shows threat level, mini spectrum bars, battery %
-- [ ] RF Scan screen shows spectrum with real ambient peaks (not flat)
+- [ ] Spectrum screen shows ambient RF activity (not flat)
 - [ ] GPS screen shows fix status or "NO GPS" if not connected
-- [ ] Serial shows `[WARMUP] Complete` after ~50 seconds
-- [ ] After warmup: `persDiv=0`, threat stays CLEAR
-- [ ] Short button press cycles through 6 screens
+- [ ] Serial shows `[WARMUP] progressive ambient tag` lines, completing after ~50 seconds
+- [ ] After warmup: threat stays at CLEAR (or drifts into ADVISORY in dense RF — see [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md))
+- [ ] Short button press cycles through 8 screens (9 on LR1121 — adds 2.4 GHz Spectrum24 page)
 - [ ] 1-second hold: acknowledge active alert
-- [ ] 3-second hold: mute buzzer for 5 minutes
-- [ ] Buzzer chirps on boot (self-test: 1000/1500/2000 Hz ascending)
+- [ ] 3-second hold on Env Mode page: cycles environment mode
+- [ ] 3-second hold on any other page: toggles global mute (5-minute silence)
+- [ ] Buzzer chirps on boot self-test
 - [ ] LED off at CLEAR, blinks on WARNING, solid on CRITICAL
+
+For full operational details (screen-by-screen field reference,
+threat-level interpretation, env-mode switching), see
+[`USER_GUIDE.md`](USER_GUIDE.md).
 
 ### Serial Output Key
 
 After warmup, the `[CAD]` line is the primary detection status:
 
 ```
-[CAD] cycle=N conf=N taps=N div=N persDiv=N vel=N sustainedCycles=N score=N
+[CAD] cycle=N subConf=N sub24Conf=N fastConf=N taps=N div=N persDiv=N vel=N sustainedCycles=N score=N fast=N confirm=N anchor=<freq>MHz
 ```
 
 | Field | Meaning |
 |-------|---------|
 | `cycle` | Scan cycle number since boot |
-| `conf` | Confirmed CAD taps (3+ consecutive hits on same frequency) |
-| `taps` | Total active taps in the tap list |
+| `subConf` | Sub-GHz CAD-confirmed corroborator score |
+| `sub24Conf` | 2.4 GHz CAD-confirmed corroborator score (LR1121 only; 0 elsewhere) |
+| `fastConf` | Fast-path detection score |
+| `taps` | Total active CAD taps in the tap list |
 | `div` | Raw diversity: distinct frequencies with CAD hits in 3s window |
-| `persDiv` | Persistent diversity: `div` when sustained >= 5 cycles, else 0 |
+| `persDiv` | Persistent diversity: `div` when sustained ≥ 5 cycles, else 0 |
 | `vel` | Diversity velocity: new persistent frequencies per window |
-| `sustainedCycles` | Consecutive cycles with raw div >= 3 (persDiv activates at 5) |
-| `score` | Weighted confidence score (ADVISORY >= 8, WARNING >= 24, CRITICAL >= 40) |
+| `sustainedCycles` | Consecutive cycles with raw `div` ≥ 3 |
+| `score` | Composite confidence score |
+| `fast` | Fast-path component of score |
+| `confirm` | Corroborator-confirmed component (the load-bearing input to the WARNING gate; threshold = 15) |
+| `anchor` | Frequency the candidate is currently locked to |
 
-**Baseline (no drone):** `persDiv=0, sustainedCycles=0, score=5`
-**Drone detected:** `persDiv=25-32, sustainedCycles=5+, score=100`
+The threat level is gated on `confirm` (the corroborator-side score)
+rather than the composite `score`. WARNING fires when `fast >= 40`
+AND `confirm >= 15` are sustained across multiple cycles. For
+operator-facing threat-level interpretation, see
+[`USER_GUIDE.md`](USER_GUIDE.md#threat-levels).
 
 ---
 
@@ -212,10 +246,8 @@ After warmup, the `[CAD]` line is the primary detection status:
 
 ## Project Status
 
-**Current version: v1.5.3** -- AAD persistence gate at 5 cycles, 0.00% false positive rate in 30-min soak, ELRS CRITICAL in 11.2s.
-
-Validated against [JUH-MAK-IN JAMMER](https://github.com/Seaforged/Juh-Mak-In-Jammer) test suite (ELRS FHSS, band sweep, Remote ID).
+**Current version: v2.0.0** — Tier 1 detection pipeline complete and field-ready. The detection engine has been validated against the [JUH-MAK-IN JAMMER](https://github.com/Seaforged/Juh-Mak-In-Jammer) test suite (ELRS FHSS, generic LoRa, Remote ID over WiFi/BLE, LoRaWAN infrastructure suppression).
 
 **Note:** GPS status prints every 5 seconds (rate-limited to prevent serial buffer overflow during long monitoring sessions).
 
-See [SENTRY-RF Known Issues Tracker](SENTRY-RF_Known_Issues_Tracker.md) for current limitations and roadmap.
+See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) for current limitations and operational watch items, including detection-scope gaps (DJI OcuSync OFDM, 5.8 GHz) that are out of Tier 1 scope.
