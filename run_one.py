@@ -8,6 +8,7 @@ import characterize as ch
 SPECS = {
     "A01": {"test_id": "A01", "label": "ELRS_FCC915_200Hz", "cmd": "e1", "group": "A"},
     "A04": {"test_id": "A04", "label": "ELRS_FCC915_25Hz",  "cmd": "e4", "group": "A"},
+    "J01": {"test_id": "J01", "label": "LoRaWAN_US915_infrastructure", "cmd": "i", "group": "J"},
 }
 
 def main(tid):
