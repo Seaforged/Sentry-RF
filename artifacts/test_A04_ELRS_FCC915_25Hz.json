@@ -3,7 +3,7 @@
   "label": "ELRS_FCC915_25Hz",
   "cmd": "e4",
   "group": "A",
-  "timestamp_start": "2026-04-26T14:14:03.080463",
+  "timestamp_start": "2026-04-27T08:34:36.065975",
   "retry_count": 0,
   "flags": [],
   "status": "OK",
@@ -11,273 +11,446 @@
     "starting_threat": "ADVISORY",
     "ambient_events": [
       {
-        "t_rel": 7.07,
+        "t_rel": 8.08,
         "line": "[PURSUIT] Activated"
       },
       {
-        "t_rel": 10.1,
+        "t_rel": 11.1,
         "line": "[PURSUIT] Deactivated"
       },
       {
-        "t_rel": 24.2,
-        "line": "[FSM] CLEAR -> ADVISORY at 39418ms"
+        "t_rel": 21.21,
+        "line": "[PURSUIT] Activated"
       },
       {
-        "t_rel": 24.2,
+        "t_rel": 41.41,
+        "line": "[PURSUIT] Deactivated"
+      },
+      {
+        "t_rel": 66.68,
+        "line": "[FSM] CLEAR -> ADVISORY at 80561ms"
+      },
+      {
+        "t_rel": 66.68,
         "line": "[ALERT] ADVISORY RF: Candidate RF track 902.1 MHz (902.1 MHz)"
       },
       {
-        "t_rel": 24.2,
+        "t_rel": 66.68,
         "line": "[ALERT] ESCALATION: CLEAR -> ADVISORY \u2014 buzzer: silent"
       },
       {
-        "t_rel": 25.21,
+        "t_rel": 66.68,
         "line": "[PURSUIT] Activated"
       },
       {
-        "t_rel": 83.7,
+        "t_rel": 86.9,
         "line": "[PURSUIT] Deactivated"
-      },
-      {
-        "t_rel": 86.72,
-        "line": "[PURSUIT] Activated"
       }
     ],
-    "baseline_anchor_freq_mhz": 916.4,
+    "baseline_anchor_freq_mhz": 917.0,
     "baseline_cad_metrics": {
-      "cycle": "28",
+      "cycle": "27",
       "subConf": "0",
-      "sub24Conf": "4",
-      "fastConf": "5",
-      "taps": "10",
-      "div": "64",
-      "persDiv": "32",
+      "sub24Conf": "10",
+      "fastConf": "0",
+      "taps": "14",
+      "div": "30",
+      "persDiv": "30",
       "vel": "0",
-      "sustainedCycles": "26",
-      "score": "25",
-      "fast": "25",
+      "sustainedCycles": "7",
+      "score": "40",
+      "fast": "40",
       "confirm": "0",
-      "anchor": "916.4MHz",
-      "hits": "2"
+      "anchor": "917.0MHz",
+      "hits": "1"
     },
-    "baseline_fhss_spread_subghz": 89,
+    "baseline_fhss_spread_subghz": 91,
     "baseline_fhss_spread_2g4": null
   },
   "sentry_tx_window": {
-    "peak_threat": "CRITICAL",
-    "peak_threat_t_rel_s": 34.183,
+    "peak_threat": "WARNING",
+    "peak_threat_t_rel_s": 12.982,
     "threat_transitions": [
       {
         "from": "ADVISORY",
         "to": "CLEAR",
-        "time_from_tx_start_s": 15.016
+        "time_from_tx_start_s": 6.906
       },
       {
         "from": "CLEAR",
-        "to": "CRITICAL",
-        "time_from_tx_start_s": 34.183
-      },
-      {
-        "from": "CRITICAL",
         "to": "WARNING",
-        "time_from_tx_start_s": 41.215
+        "time_from_tx_start_s": 12.982
       },
       {
         "from": "WARNING",
         "to": "ADVISORY",
-        "time_from_tx_start_s": 51.295
+        "time_from_tx_start_s": 20.061
       },
       {
         "from": "ADVISORY",
         "to": "CLEAR",
-        "time_from_tx_start_s": 61.371
+        "time_from_tx_start_s": 23.092
       },
       {
         "from": "CLEAR",
         "to": "ADVISORY",
-        "time_from_tx_start_s": 80.545
+        "time_from_tx_start_s": 59.5
       },
       {
         "from": "ADVISORY",
-        "to": "CLEAR",
-        "time_from_tx_start_s": 86.578
+        "to": "WARNING",
+        "time_from_tx_start_s": 108.069
       },
       {
-        "from": "CLEAR",
+        "from": "WARNING",
         "to": "ADVISORY",
-        "time_from_tx_start_s": 91.609
+        "time_from_tx_start_s": 115.137
       },
       {
         "from": "ADVISORY",
-        "to": "CLEAR",
-        "time_from_tx_start_s": 101.689
-      },
-      {
-        "from": "CLEAR",
-        "to": "ADVISORY",
-        "time_from_tx_start_s": 111.773
+        "to": "WARNING",
+        "time_from_tx_start_s": 118.177
       }
     ],
-    "time_to_advisory_s": 51.295,
-    "time_to_warning_s": 41.215,
-    "time_to_critical_s": 34.183,
+    "time_to_advisory_s": 1.841,
+    "time_to_warning_s": 12.982,
+    "time_to_critical_s": null,
     "cad_at_peak": {
-      "cycle": "6",
-      "subConf": "32",
-      "sub24Conf": "13",
-      "fastConf": "32",
-      "taps": "64",
-      "div": "38",
-      "persDiv": "38",
+      "cycle": "30",
+      "subConf": "1",
+      "sub24Conf": "10",
+      "fastConf": "3",
+      "taps": "13",
+      "div": "30",
+      "persDiv": "30",
       "vel": "0",
-      "sustainedCycles": "4",
-      "score": "70",
-      "fast": "60",
+      "sustainedCycles": "10",
+      "score": "50",
+      "fast": "40",
       "confirm": "10",
       "anchor": "902.3MHz",
-      "hits": "8",
+      "hits": "4",
       "_anchor_freq": "902.3MHz",
       "_anchor_sf": "SF6",
-      "_anchor_hits": "8"
+      "_anchor_hits": "4"
     },
-    "cad_at_peak_line": "[CAD] cycle=6 subConf=32 sub24Conf=13 fastConf=32 taps=64 div=38 persDiv=38 vel=0 sustainedCycles=4 score=70 fast=60 confirm=10 anchor=902.3MHz SF6 hits=8",
+    "cad_at_peak_line": "[CAD] cycle=30 subConf=1 sub24Conf=10 fastConf=3 taps=13 div=30 persDiv=30 vel=0 sustainedCycles=10 score=50 fast=40 confirm=10 anchor=902.3MHz SF6 hits=4",
     "scan_peaks": [
       {
-        "t_rel": 15.018,
-        "freq_mhz": 912.4,
-        "rssi_dbm": -58.5
+        "t_rel": 1.843,
+        "freq_mhz": 908.2,
+        "rssi_dbm": -70.0
       },
       {
-        "t_rel": 24.091,
-        "freq_mhz": 917.6,
-        "rssi_dbm": -43.0
+        "t_rel": 12.985,
+        "freq_mhz": 927.0,
+        "rssi_dbm": -38.5
       },
       {
-        "t_rel": 34.185,
-        "freq_mhz": 926.0,
+        "t_rel": 23.093,
+        "freq_mhz": 872.2,
+        "rssi_dbm": -98.0
+      },
+      {
+        "t_rel": 33.208,
+        "freq_mhz": 926.4,
         "rssi_dbm": -39.0
       },
       {
-        "t_rel": 44.223,
-        "freq_mhz": 911.6,
-        "rssi_dbm": -52.5
+        "t_rel": 44.327,
+        "freq_mhz": 905.6,
+        "rssi_dbm": -47.5
       },
       {
-        "t_rel": 54.315,
-        "freq_mhz": 921.6,
-        "rssi_dbm": -36.0
+        "t_rel": 54.44,
+        "freq_mhz": 913.8,
+        "rssi_dbm": -54.0
       },
       {
-        "t_rel": 65.42,
-        "freq_mhz": 902.4,
-        "rssi_dbm": -52.0
+        "t_rel": 65.578,
+        "freq_mhz": 906.4,
+        "rssi_dbm": -54.5
       },
       {
-        "t_rel": 75.491,
-        "freq_mhz": 922.0,
+        "t_rel": 75.7,
+        "freq_mhz": 887.6,
+        "rssi_dbm": -96.0
+      },
+      {
+        "t_rel": 86.83,
+        "freq_mhz": 914.8,
+        "rssi_dbm": -61.5
+      },
+      {
+        "t_rel": 96.964,
+        "freq_mhz": 909.6,
         "rssi_dbm": -58.5
       },
       {
-        "t_rel": 86.581,
-        "freq_mhz": 919.6,
-        "rssi_dbm": -39.5
+        "t_rel": 108.072,
+        "freq_mhz": 918.4,
+        "rssi_dbm": -41.0
       },
       {
-        "t_rel": 96.66,
-        "freq_mhz": 886.6,
-        "rssi_dbm": -106.5
-      },
-      {
-        "t_rel": 107.737,
-        "freq_mhz": 929.6,
-        "rssi_dbm": -85.5
-      },
-      {
-        "t_rel": 117.811,
-        "freq_mhz": 929.6,
-        "rssi_dbm": -82.0
+        "t_rel": 118.179,
+        "freq_mhz": 886.8,
+        "rssi_dbm": -100.0
       }
     ],
     "fhss_spread_events": [
       {
-        "t_rel": 84.558,
+        "t_rel": 0.828,
         "band": "subGHz",
-        "unique": 96,
-        "baseline": 93,
+        "unique": 93,
+        "baseline": 90,
         "delta": 3
       },
       {
-        "t_rel": 105.72,
+        "t_rel": 10.955,
+        "band": "subGHz",
+        "unique": 94,
+        "baseline": 88,
+        "delta": 6
+      },
+      {
+        "t_rel": 19.049,
+        "band": "subGHz",
+        "unique": 93,
+        "baseline": 87,
+        "delta": 6
+      },
+      {
+        "t_rel": 30.175,
+        "band": "subGHz",
+        "unique": 95,
+        "baseline": 85,
+        "delta": 10
+      },
+      {
+        "t_rel": 32.198,
         "band": "subGHz",
         "unique": 96,
-        "baseline": 92,
+        "baseline": 85,
+        "delta": 11
+      },
+      {
+        "t_rel": 40.278,
+        "band": "subGHz",
+        "unique": 94,
+        "baseline": 84,
+        "delta": 10
+      },
+      {
+        "t_rel": 42.303,
+        "band": "subGHz",
+        "unique": 94,
+        "baseline": 84,
+        "delta": 10
+      },
+      {
+        "t_rel": 49.378,
+        "band": "2G4",
+        "unique": 22,
+        "baseline": 19,
+        "delta": 3
+      },
+      {
+        "t_rel": 51.397,
+        "band": "2G4",
+        "unique": 22,
+        "baseline": 19,
+        "delta": 3
+      },
+      {
+        "t_rel": 52.412,
+        "band": "subGHz",
+        "unique": 95,
+        "baseline": 82,
+        "delta": 13
+      },
+      {
+        "t_rel": 53.427,
+        "band": "2G4",
+        "unique": 22,
+        "baseline": 19,
+        "delta": 3
+      },
+      {
+        "t_rel": 61.527,
+        "band": "subGHz",
+        "unique": 91,
+        "baseline": 81,
+        "delta": 10
+      },
+      {
+        "t_rel": 63.552,
+        "band": "subGHz",
+        "unique": 96,
+        "baseline": 81,
+        "delta": 15
+      },
+      {
+        "t_rel": 69.619,
+        "band": "2G4",
+        "unique": 23,
+        "baseline": 19,
+        "delta": 4
+      },
+      {
+        "t_rel": 71.642,
+        "band": "subGHz",
+        "unique": 90,
+        "baseline": 80,
+        "delta": 10
+      },
+      {
+        "t_rel": 72.656,
+        "band": "2G4",
+        "unique": 23,
+        "baseline": 19,
+        "delta": 4
+      },
+      {
+        "t_rel": 74.682,
+        "band": "subGHz",
+        "unique": 96,
+        "baseline": 80,
+        "delta": 16
+      },
+      {
+        "t_rel": 74.682,
+        "band": "2G4",
+        "unique": 22,
+        "baseline": 19,
+        "delta": 3
+      },
+      {
+        "t_rel": 82.775,
+        "band": "subGHz",
+        "unique": 90,
+        "baseline": 79,
+        "delta": 11
+      },
+      {
+        "t_rel": 84.804,
+        "band": "subGHz",
+        "unique": 88,
+        "baseline": 79,
+        "delta": 9
+      },
+      {
+        "t_rel": 90.883,
+        "band": "2G4",
+        "unique": 22,
+        "baseline": 17,
+        "delta": 5
+      },
+      {
+        "t_rel": 92.911,
+        "band": "subGHz",
+        "unique": 92,
+        "baseline": 78,
+        "delta": 14
+      },
+      {
+        "t_rel": 92.911,
+        "band": "2G4",
+        "unique": 22,
+        "baseline": 17,
+        "delta": 5
+      },
+      {
+        "t_rel": 94.934,
+        "band": "subGHz",
+        "unique": 85,
+        "baseline": 78,
+        "delta": 7
+      },
+      {
+        "t_rel": 102.017,
+        "band": "2G4",
+        "unique": 22,
+        "baseline": 18,
+        "delta": 4
+      },
+      {
+        "t_rel": 104.031,
+        "band": "2G4",
+        "unique": 22,
+        "baseline": 18,
+        "delta": 4
+      },
+      {
+        "t_rel": 106.054,
+        "band": "subGHz",
+        "unique": 88,
+        "baseline": 76,
+        "delta": 12
+      },
+      {
+        "t_rel": 114.124,
+        "band": "subGHz",
+        "unique": 79,
+        "baseline": 75,
         "delta": 4
       }
     ],
     "alert_events": [
       {
-        "t_rel": 34.185,
-        "line": "[ALERT] CRITICAL RF: Candidate RF track 902.3 MHz (902.3 MHz)"
+        "t_rel": 6.906,
+        "line": "[ALERT] INFO RF: Candidate clear (917.0 MHz)"
       },
       {
-        "t_rel": 34.185,
-        "line": "[ALERT] ESCALATION: CLEAR -> CRITICAL \u2014 buzzer: ON"
+        "t_rel": 6.906,
+        "line": "[ALERT] De-escalation: ADVISORY -> CLEAR \u2014 buzzer: ALL_CLEAR"
       },
       {
-        "t_rel": 41.216,
+        "t_rel": 12.985,
         "line": "[ALERT] WARNING RF: Candidate RF track 902.3 MHz (902.3 MHz)"
       },
       {
-        "t_rel": 51.295,
+        "t_rel": 12.985,
+        "line": "[ALERT] ESCALATION: CLEAR -> WARNING \u2014 buzzer: ON"
+      },
+      {
+        "t_rel": 20.061,
         "line": "[ALERT] ADVISORY RF: Candidate RF track 902.3 MHz (902.3 MHz)"
       },
       {
-        "t_rel": 61.371,
-        "line": "[ALERT] INFO RF: Candidate clear"
+        "t_rel": 23.093,
+        "line": "[ALERT] INFO RF: Candidate clear (917.0 MHz)"
       },
       {
-        "t_rel": 61.372,
+        "t_rel": 23.093,
         "line": "[ALERT] De-escalation: ADVISORY -> CLEAR \u2014 buzzer: ALL_CLEAR"
       },
       {
-        "t_rel": 80.545,
-        "line": "[ALERT] ADVISORY RF: Candidate RF track 902.2 MHz (902.2 MHz)"
+        "t_rel": 59.5,
+        "line": "[ALERT] ADVISORY RF: Candidate RF track 916.6 MHz (916.6 MHz)"
       },
       {
-        "t_rel": 80.545,
+        "t_rel": 59.5,
         "line": "[ALERT] ESCALATION: CLEAR -> ADVISORY \u2014 buzzer: silent"
       },
       {
-        "t_rel": 86.577,
-        "line": "[ALERT] INFO RF: Candidate clear (902.3 MHz)"
+        "t_rel": 108.072,
+        "line": "[ALERT] WARNING RF: Candidate RF track 921.4 MHz (921.4 MHz)"
       },
       {
-        "t_rel": 86.581,
-        "line": "[ALERT] De-escalation: ADVISORY -> CLEAR \u2014 buzzer: ALL_CLEAR"
+        "t_rel": 108.072,
+        "line": "[ALERT] ESCALATION: ADVISORY -> WARNING \u2014 buzzer: ON"
       },
       {
-        "t_rel": 91.608,
-        "line": "[ALERT] ADVISORY RF: Candidate RF track 902.3 MHz (902.3 MHz)"
+        "t_rel": 115.138,
+        "line": "[ALERT] ADVISORY RF: Candidate RF track 902.7 MHz (902.7 MHz)"
       },
       {
-        "t_rel": 91.608,
-        "line": "[ALERT] ESCALATION: CLEAR -> ADVISORY \u2014 buzzer: silent"
+        "t_rel": 118.179,
+        "line": "[ALERT] WARNING RF: Candidate RF track 902.7 MHz (902.7 MHz)"
       },
       {
-        "t_rel": 101.689,
-        "line": "[ALERT] INFO RF: Candidate clear (902.3 MHz)"
-      },
-      {
-        "t_rel": 101.69,
-        "line": "[ALERT] De-escalation: ADVISORY -> CLEAR \u2014 buzzer: ALL_CLEAR"
-      },
-      {
-        "t_rel": 111.773,
-        "line": "[ALERT] ADVISORY RF: Candidate RF track 902.8 MHz (902.8 MHz)"
-      },
-      {
-        "t_rel": 111.773,
-        "line": "[ALERT] ESCALATION: CLEAR -> ADVISORY \u2014 buzzer: silent"
+        "t_rel": 118.179,
+        "line": "[ALERT] ESCALATION: ADVISORY -> WARNING \u2014 buzzer: ON"
       }
     ]
   },
@@ -285,25 +458,25 @@
     "tx_started_confirmed": true,
     "protocol_banner": "[ELRS-FCC915] 40ch 903.5-926.9MHz SF9/BW500 25Hz hop_every_4 sync_ch=20",
     "proto_counter_key": "ELRS",
-    "packets": 2869,
-    "hops": 717,
-    "duration_s": 120.173,
-    "effective_pkts_per_s": 23.874,
-    "effective_hops_per_s": 5.966,
+    "packets": 2999,
+    "hops": 749,
+    "duration_s": 120.183,
+    "effective_pkts_per_s": 24.954,
+    "effective_hops_per_s": 6.232,
     "all_counters": {
       "ELRS": {
-        "packets": 2869,
-        "hops": 717,
-        "line": "[ELRS] TX OFF: 2869 packets, 717 hops (4.0 pkts/hop avg)"
+        "packets": 2999,
+        "hops": 749,
+        "line": "[ELRS] TX OFF: 2999 packets, 749 hops (4.0 pkts/hop avg)"
       }
     }
   },
   "sentry_post_q": {
-    "return_to_starting_threat_s": 7.721,
-    "reached_clear": true,
-    "clear_achieved_at_s": 1.658,
+    "return_to_starting_threat_s": 8.118,
+    "reached_clear": false,
+    "clear_achieved_at_s": null,
     "final_threat": "ADVISORY"
   },
-  "timestamp_end": "2026-04-26T14:18:13.175982",
-  "duration_s": 248.49
+  "timestamp_end": "2026-04-27T08:40:30.293754",
+  "duration_s": 352.62
 }
