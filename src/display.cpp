@@ -757,17 +757,13 @@ void screenEnvMode(Adafruit_SSD1306& disp, const SystemState& state, int page) {
 
     char buf[22];
     disp.setCursor(0, 36);
-    snprintf(buf, sizeof(buf), " Tap thresh: %.0f dB",
-             currentTapThresholdDb());
-    disp.print(buf);
-
-    disp.setCursor(0, 46);
     uint32_t ttlMs = currentSkipTtlMs();
-    snprintf(buf, sizeof(buf), " WiFi skip:  %u min",
+    snprintf(buf, sizeof(buf), " Tap %.0fdB  Skip %umin",
+             currentTapThresholdDb(),
              (unsigned)(ttlMs / 60000));
     disp.print(buf);
 
-    disp.setCursor(0, 56);
+    disp.setCursor(0, 48);
     disp.print("Hold 3+ s to change");
 
     drawPageDots(disp, page, NUM_SCREENS);

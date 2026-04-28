@@ -8,7 +8,7 @@ this target.
 
 This doc is a hardware-side reference: pinout, antenna identification,
 known quirks. It does not cover firmware operation — see
-[FLASHING.md](FLASHING.md) and `USER_GUIDE.md` *(in flight)* for that.
+[FLASHING.md](FLASHING.md) and [`USER_GUIDE.md`](USER_GUIDE.md) for that.
 
 For the SX1262-equipped sister board, see
 [HARDWARE_T3S3_SX1262.md](HARDWARE_T3S3_SX1262.md). The two boards
@@ -227,5 +227,5 @@ via the U.FL cable.
 - [HARDWARE_T3S3_SX1262.md](HARDWARE_T3S3_SX1262.md) — the SX1262
   sister board
 - `include/board_config.h` — authoritative pin/capability source
-- `USER_GUIDE.md` *(in flight)* — operating the device
-- `KNOWN_ISSUES.md` *(in flight)* — limitations and watch items
+- [`USER_GUIDE.md`](USER_GUIDE.md) — operating the device
+- [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) — limitations and watch items

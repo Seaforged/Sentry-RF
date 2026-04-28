@@ -297,8 +297,16 @@ Env Mode OLED page.
 Navigate to the Env Mode page (single-press through the screens
 until you see "ENV MODE / [<current>]"). Hold BOOT for 3–4
 seconds. The mode advances URBAN → SUBURBAN → RURAL → URBAN. The
-new mode is written to NVS immediately and the threshold values
-take effect on the next scan cycle.
+new mode is written to NVS immediately and takes partial effect:
+
+- **Peak threshold** (the dB-above-NF gate consumed by the RSSI
+  sweep): takes effect on the next scan cycle. Immediate.
+- **WiFi skip-list TTL:** applies to **newly-learned** skip
+  entries only. Existing skip entries keep the TTL captured at
+  learn time as an absolute deadline; switching modes does not
+  retroactively shorten or extend them. To reset the skip-list
+  state entirely, power-cycle the device, or wait for current
+  entries to expire on their original timer.
 
 ---
 

@@ -30,8 +30,8 @@ the antennas it expects.
 
 | Board variant | Target | Sub-GHz | 2.4 GHz | GPS | Reference |
 |---|---|---|---|---|---|
-| LilyGo T3S3 V1.3 with **SX1262** | `t3s3` | yes (single-band) | no | yes (u-blox) | `HARDWARE_T3S3_SX1262.md` *(in flight)* |
-| LilyGo T3S3 V1.3 with **LR1121** | `t3s3_lr1121` | yes | yes (dual-band) | yes (u-blox) | `HARDWARE_T3S3_LR1121.md` *(in flight)* |
+| LilyGo T3S3 V1.3 with **SX1262** | `t3s3` | yes (single-band) | no | yes (u-blox) | [`HARDWARE_T3S3_SX1262.md`](HARDWARE_T3S3_SX1262.md) |
+| LilyGo T3S3 V1.3 with **LR1121** | `t3s3_lr1121` | yes | yes (dual-band) | yes (u-blox) | [`HARDWARE_T3S3_LR1121.md`](HARDWARE_T3S3_LR1121.md) |
 | Heltec WiFi LoRa 32 V3 | `heltec_v3` | yes | no | **no** | external (Heltec docs) |
 
 The two T3S3 variants are physically similar but ship with different
@@ -398,10 +398,10 @@ the full list of build-time options and their default values.
 
 ## Where to go next
 
-Once flashed, see `USER_GUIDE.md` *(in flight)* for operating the
+Once flashed, see [`USER_GUIDE.md`](USER_GUIDE.md) for operating the
 device — what the OLED screens mean, how to switch environment
 modes, how to interpret threat alerts, and how to read the Remote ID
 output.
 
-For known limitations and watch items, see `KNOWN_ISSUES.md` *(in
-flight)*.
+For known limitations and watch items, see
+[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).

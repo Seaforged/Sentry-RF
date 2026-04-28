@@ -1,10 +1,10 @@
 # SENTRY-RF OLED Screen Glossary
 
-Reference guide for every data field shown on the 7 OLED screens. Intended for operators, field testers, and new developers who need to understand what the display is telling them at a glance.
+Reference guide for every data field shown on the OLED screens. Intended for operators, field testers, and new developers who need to understand what the display is telling them at a glance.
 
-**Hardware:** LilyGo T3S3 with SSD1306 128×64 OLED
-**Firmware:** v1.6.0+
-**Navigation:** Short press BOOT button to cycle screens. 7 screens total, indicated by page dots at the bottom.
+**Hardware:** LilyGo T3S3 / Heltec WiFi LoRa 32 V3 with SSD1306 128×64 OLED
+**Firmware:** v2.0.0 (Tier 1 ship-ready)
+**Navigation:** Short press BOOT button to cycle screens. **8 screens** on SX1262-based boards (T3S3 SX1262, Heltec V3); **9 screens** on the LR1121 board (adds the 2.4 GHz spectrum page). Page dots at the bottom indicate the active screen.
 
 ---
 
@@ -98,15 +98,51 @@ Hardware health and firmware diagnostics.
 
 ---
 
-## Screen 6 — 2.4 GHz Spectrum (2400–2500 MHz)
+## Screen 6 — Remote ID
 
-Full-width spectrum analyzer for the 2.4 GHz ISM band. Only available on LR1121 boards (HAS_24GHZ = true). Shows where ELRS 2.4 GHz, DJI OcuSync, and WiFi signals are operating.
+Latest decoded ASTM F3411 Remote ID broadcast (over WiFi or BLE). Drone-broadcast UAS-ID, position, and pilot location when reported by a compliant emitter.
+
+| Field | Example | Meaning |
+|---|---|---|
+| RID | — | Screen title. |
+| UAS-ID | XYZ-12345 | Decoded UAS identifier from the RID payload. Empty if no decoded RID has been received this session. |
+| Drone position | 36.708 / -76.241 | Drone's broadcast position (lat / lon). Empty until a RID with location data is received. |
+| Pilot position | 36.706 / -76.243 | Operator's broadcast position, when the drone reports it. |
+| Distance | 412 m | Distance from the SENTRY-RF unit to the drone, calculated when both have valid 3D fixes. Triggers the proximity-CRITICAL escalation when under 500 m. |
+| OUI matches | 19 | Count of frames where the RID OUI (`FA:0B:BC` Open Drone ID) was matched but the inner pack didn't decode. Logged at INFO level only. |
+| No data | — | Shown when no RID frames have been received this session. |
+
+The screen appears on every board (WiFi RID via the ESP32-S3, BLE RID via the integrated BLE 5.0 stack — both enabled on T3S3 SX1262, T3S3 LR1121, and Heltec V3).
+
+---
+
+## Screen 7 *(LR1121 only)* — 2.4 GHz Spectrum (2400–2500 MHz)
+
+Full-width spectrum analyzer for the 2.4 GHz ISM band. Only available on LR1121 boards (`HAS_24GHZ = true`). Shows where ELRS 2.4 GHz, DJI OcuSync, and WiFi signals are operating.
+
+On SX1262-based boards (T3S3 SX1262, Heltec V3) this screen is absent — Env Mode (below) takes index 7 instead.
 
 | Field | Example | Meaning |
 |---|---|---|
 | 2.4GHz 2400–2500MHz | — | Frequency range being swept by the LR1121's second radio path. |
 | [bar chart] | — | RSSI at each frequency bin across 2400–2500 MHz. Same concept as the sub-GHz spectrum screen. |
 | Pk:nnnn -nnndBm | Pk:2411 -104dBm | Peak signal in the 2.4 GHz band. 2411 MHz = WiFi channel 2. Common WiFi channels: 2412 (ch1), 2437 (ch6), 2462 (ch11). ELRS 2.4 GHz operates across 2400–2480 MHz. |
+
+---
+
+## Screen 7 *(SX1262 / Heltec)* / Screen 8 *(LR1121)* — Env Mode
+
+The runtime environment-mode page. Displays the active operator mode and its derived thresholds; long-pressing BOOT here cycles the mode.
+
+| Field | Example | Meaning |
+|---|---|---|
+| ENV MODE | — | Screen title. |
+| `[<mode>]` | `[SUBURBAN]` | Currently active environment mode: `URBAN`, `SUBURBAN` (default), or `RURAL`. Renders in size-2 (large) text, centered. |
+| Tap NN dB | Tap 10dB | The peak threshold above noise floor that the RSSI sweep uses to gate CAD probing. URBAN=12, SUBURBAN=10, RURAL=6. |
+| Skip N min | Skip 3min | The TTL for newly-learned WiFi skip-list entries. URBAN=5, SUBURBAN=3, RURAL=1. **Note:** TTL change applies to *newly-learned* skip entries only; existing entries keep their captured TTL until expiry. |
+| Hold 3+ s to change | — | Operator instruction. The button FSM cycles the mode on any hold ≥ 3000 ms; there is no upper bound on the hold time. |
+
+Mode persists in NVS flash across power cycles. The active mode also appears in the boot banner on serial: `[ENV-MODE] loaded from NVS: <mode> (tap=N.N skip=Nms)`.
 
 ---
 
@@ -127,14 +163,11 @@ dBm (decibels relative to one milliwatt) measures signal power. More negative = 
 
 ## Threat Level Progression
 
-| Level | Score Range | What it means | Buzzer behavior |
-|---|---|---|---|
-| CLEAR | 0 | No drone-like RF activity detected | Silent |
-| ADVISORY | 1–23 | Something detected — could be ambient ISM traffic or a distant drone. Monitor. | Silent |
-| WARNING | 24–69 | Likely drone activity — multiple detection indicators corroborating. Investigate. | Beeping pattern |
-| CRITICAL | 70–100 | High-confidence drone detection or active GNSS attack. Take action. | Urgent tone |
+The four threat levels (`CLEAR`, `ADVISORY`, `WARNING`, `CRITICAL`) are gated on the engine's `fast` and `confirm` corroborator scores rather than a single composite score. The load-bearing gate is `confirm ≥ POLICY_WARNING_CONFIRM=15` for WARNING. For the operator-facing description of each level, what triggers escalation, and the buzzer behavior at each level, see [`USER_GUIDE.md`](USER_GUIDE.md#threat-levels).
+
+For the per-`[CAD]` log-line field reference (`fast`, `confirm`, `fastConf`, `subConf`, `sub24Conf`, etc.) used during firmware-side debugging, see [`BUILD_GUIDE.md`](BUILD_GUIDE.md#serial-output-key).
 
 ---
 
-*Last updated: April 11, 2026 — v1.6.0*
+*Last updated: 2026-04-27 — v2.0.0 (Tier 1 ship-ready)*
 *Review and update this document when new screens or data fields are added.*
