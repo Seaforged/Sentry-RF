@@ -768,7 +768,7 @@ void screenEnvMode(Adafruit_SSD1306& disp, const SystemState& state, int page) {
     disp.print(buf);
 
     disp.setCursor(0, 56);
-    disp.print("Hold 3-5s to change");
+    disp.print("Hold 3+ s to change");
 
     drawPageDots(disp, page, NUM_SCREENS);
     disp.display();
